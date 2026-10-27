@@ -18,7 +18,14 @@ const State = {
     rapatDrama: { active: false, scenario: 0, step: 0, peace: 100, timer: null, typeTimer: null, nextTimer: null, history: [] },
     wawancara: { active: false, index: 0, score: 0, activeQuestions: [], isSpeaking: false },
     psikologi: { active: false, index: 0, score: 0, activeQuestions: [] },
-    media: { isRecording: false, recog: null, keywords: {}, ttsVoices: [] }
+    media: { 
+        isRecording: false, 
+        recog: null, 
+        keywords: {}, 
+        ttsVoices: [], 
+        ttsPlaying: false, 
+        ttsPaused: false   
+    }
 };
 
 let pidatoRecog = null;
@@ -142,7 +149,11 @@ function router() {
     if(State.rapatDrama.timer) { clearInterval(State.rapatDrama.timer); State.rapatDrama.timer = null; }
     if(State.rapatDrama.typeTimer) { clearTimeout(State.rapatDrama.typeTimer); State.rapatDrama.typeTimer = null; }
     if(State.rapatDrama.nextTimer) { clearTimeout(State.rapatDrama.nextTimer); State.rapatDrama.nextTimer = null; }
+    
     if(window.speechSynthesis) { window.speechSynthesis.cancel(); }
+    State.media.ttsPlaying = false;
+    State.media.ttsPaused = false;
+    
     if(pidatoRecog && State.media.isRecording) { try { pidatoRecog.stop(); } catch(e){} State.media.isRecording = false; }
     if(presRecog && State.media.isRecording) { try { presRecog.stop(); } catch(e){} State.media.isRecording = false; }
 
@@ -423,7 +434,7 @@ function renderPidato() {
             <p style="color: var(--text-muted);">Uji kemampuan public speaking Anda menggunakan Bahasa Jawa yang baik dan benar.</p>
         </div>
         
-        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1.5rem;">
+        <div style="display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1.5rem;">
             <div>
                 <label style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Pilih Teks Pidato:</label>
                 <select id="p-select" class="input-field" onchange="loadPidatoText()" style="margin-bottom:0;">
@@ -440,9 +451,10 @@ function renderPidato() {
             </div>
         </div>
 
-        <div style="display:flex; gap: 1rem; margin-bottom: 1.5rem;">
-            <button class="btn btn-success" style="flex:1; padding: 1rem;" id="pid-tts-btn" onclick="playPidatoTTS()">🔊 Dengarkan Teks</button>
-            <button class="btn" style="flex:1; padding: 1rem;" id="pid-btn" onclick="togglePidato()">🎤 Mulai Baca</button>
+        <div style="display:flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
+            <button class="btn btn-success" style="flex:1; padding: 1rem; min-width: 150px;" id="pid-tts-btn" onclick="playPidatoTTS()">🔊 Dengarkan Teks</button>
+            <button class="btn btn-danger hidden" style="flex:1; padding: 1rem; min-width: 100px;" id="pid-stop-btn" onclick="stopPidatoTTS()">⏹️ Stop TTS</button>
+            <button class="btn" style="flex:1; padding: 1rem; min-width: 150px;" id="pid-btn" onclick="togglePidato()">🎤 Mulai Baca</button>
         </div>
         
         <div class="recording-box" id="pid-rec"><div class="dot"></div> Mendengarkan suara Anda...</div>
@@ -600,7 +612,6 @@ function showQuizQuestion() {
         document.getElementById('q-next').disabled = false; 
         document.getElementById('q-next').innerText = (State.quiz.index === State.quiz.activeQuestions.length - 1) ? "Selesai & Simpan" : "Lanjut Soal Berikutnya ➔";
     } else {
-        // Hitung kunci jawaban yang benar di awal
         const rawAnswer = String(q.answer).trim();
         let correctIdx = -1;
         if (/^[0-3]$/.test(rawAnswer)) correctIdx = parseInt(rawAnswer);
@@ -723,7 +734,6 @@ function nextQuizQuestion() {
         State.quiz.index = nextIdx;
         showQuizQuestion();
     } else {
-        // Cari soal yang belum dijawab (dilewati)
         const skippedIdx = State.quiz.status.findIndex(s => s === 'unanswered');
         if (skippedIdx !== -1) {
             alert("Masih ada soal yang belum dijawab. Sistem mengarahkan Anda ke soal tersebut.");
@@ -926,13 +936,146 @@ function togglePres() { if(!presRecog) return alert("Browser tidak mendukung mic
 
 // --- PIDATO JAWA ---
 function populateVoices() { if (!('speechSynthesis' in window)) return; const loadVoices = () => { State.media.ttsVoices = window.speechSynthesis.getVoices().filter(v => v.lang.includes('id') || v.lang.includes('ID')); }; loadVoices(); window.speechSynthesis.onvoiceschanged = loadVoices; }
-function loadPidatoText() { const selectEl = document.getElementById('p-select'); if(!selectEl) return; if(window.speechSynthesis) window.speechSynthesis.cancel(); const val = selectEl.value; const selectedPidato = State.pidatoList.find(p => p.id === val); if (!selectedPidato) return; const rawTxt = selectedPidato.teks; let paragraphs = rawTxt.split('\n'); let htmlResult = ""; pidatoWords = []; let globalIdx = 0; paragraphs.forEach(p => { if(!p.trim()) return; htmlResult += "<p>"; let words = p.split(/(\s+)/); words.forEach(w => { if(w.trim() === '') { htmlResult += w; } else { htmlResult += `<span class="word" id="pw-${globalIdx}">${w}</span>`; pidatoWords.push(w); globalIdx++; } }); htmlResult += "</p>"; }); document.getElementById('p-text').innerHTML = htmlResult; pidatoMatchCount = 0; document.getElementById('p-score').innerText = ''; const ttsBtn = document.getElementById('pid-tts-btn'); if(ttsBtn) { ttsBtn.innerText = "🔊 Dengarkan Teks"; ttsBtn.disabled = false; } }
+function loadPidatoText() { const selectEl = document.getElementById('p-select'); if(!selectEl) return; if(window.speechSynthesis) window.speechSynthesis.cancel(); const val = selectEl.value; const selectedPidato = State.pidatoList.find(p => p.id === val); if (!selectedPidato) return; const rawTxt = selectedPidato.teks; let paragraphs = rawTxt.split('\n'); let htmlResult = ""; pidatoWords = []; let globalIdx = 0; paragraphs.forEach(p => { if(!p.trim()) return; htmlResult += "<p>"; let words = p.split(/(\s+)/); words.forEach(w => { if(w.trim() === '') { htmlResult += w; } else { htmlResult += `<span class="word" id="pw-${globalIdx}">${w}</span>`; pidatoWords.push(w); globalIdx++; } }); htmlResult += "</p>"; }); document.getElementById('p-text').innerHTML = htmlResult; pidatoMatchCount = 0; document.getElementById('p-score').innerText = ''; const ttsBtn = document.getElementById('pid-tts-btn'); if(ttsBtn) { ttsBtn.innerText = "🔊 Dengarkan Teks"; ttsBtn.disabled = false; } const stopBtn = document.getElementById('pid-stop-btn'); if(stopBtn) stopBtn.classList.add('hidden'); }
 function getPhonetic(word) { let cleanWord = word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]/g, ""); const dict = { "inna": "inna", "rojiun": "rojingun", "rajiun": "rojingun", "sambekala": "sambekolo", "kawasa": "kuwoso", "sedaya": "sedoyo", "berkah": "berkah", "menika": "meniko", "jenazah": "jenazah", "wa": "wa", "allah": "alloh", "warrahmatullah": "warrahmatulloh", "takziyah": "takziyah", "tanaga": "tenogo", "mbok": "bok", "wabarakatuh": "wabarokatuh" }; if (dict[cleanWord]) { let result = dict[cleanWord]; if (word[0] === word[0].toUpperCase()) result = result.charAt(0).toUpperCase() + result.slice(1); let punctuation = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/); return result + (punctuation ? punctuation[0] : ""); } let w = cleanWord; w = w.replace(/dh/g, 'd').replace(/th/g, 't'); if (w.endsWith('ah')) w = w.slice(0, -2) + 'oh'; else if (w.endsWith('a')) w = w.slice(0, -1) + 'o'; if (word[0] === word[0].toUpperCase()) w = w.charAt(0).toUpperCase() + w.slice(1); let punctuation = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/); return w + (punctuation ? punctuation[0] : ""); }
-function playPidatoTTS() { if (!('speechSynthesis' in window)) return alert("Browser tidak mendukung suara."); const selectEl = document.getElementById('p-select'); const val = selectEl.value; const selectedPidato = State.pidatoList.find(p => p.id === val); if (!selectedPidato) return; window.speechSynthesis.cancel(); if (State.media.isRecording) togglePidato(); const rawTxt = selectedPidato.teks; let phoneticText = " "; let wordIndices = []; let globalIdx = 0; let paragraphs = rawTxt.split('\n'); paragraphs.forEach(p => { if(!p.trim()) { phoneticText += " \n "; return; } let words = p.split(/(\s+)/); words.forEach(w => { if(w.trim() === '') phoneticText += w; else { let phon = getPhonetic(w); let start = phoneticText.length; phoneticText += phon; let end = phoneticText.length; wordIndices.push({ originalIndex: globalIdx, start: start, end: end }); globalIdx++; } }); phoneticText += " \n "; }); const utterance = new SpeechSynthesisUtterance(phoneticText); const voiceMode = document.getElementById('tts-voice-select').value; let selectedVoice = null; if (State.media.ttsVoices.length > 0) { if (voiceMode === 'male') selectedVoice = State.media.ttsVoices.find(v => v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('ardi') || v.name.toLowerCase().includes('andika')); else if (voiceMode === 'female') selectedVoice = State.media.ttsVoices.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('gadis') || v.name.toLowerCase().includes('damayanti')); } if (selectedVoice) utterance.voice = selectedVoice; utterance.lang = 'id-ID'; utterance.rate = 0.85; utterance.pitch = 0.95; const ttsBtn = document.getElementById('pid-tts-btn'); ttsBtn.innerText = "⏳ Memutar Suara..."; ttsBtn.disabled = true; document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); utterance.onboundary = (event) => { if (event.name === 'word') { const charIdx = event.charIndex; const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); if (found) { document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); const span = document.getElementById(`pw-${found.originalIndex}`); if (span) span.classList.add('tts-active'); } } }; utterance.onend = () => { ttsBtn.innerText = "🔊 Dengarkan Teks"; ttsBtn.disabled = false; document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); }; setTimeout(() => { window.speechSynthesis.speak(utterance); }, 250); }
+
+function playPidatoTTS() { 
+    if (!('speechSynthesis' in window)) return alert("Browser tidak mendukung suara."); 
+    const ttsBtn = document.getElementById('pid-tts-btn');
+    const stopBtn = document.getElementById('pid-stop-btn');
+    
+    if (State.media.ttsPaused) {
+        window.speechSynthesis.resume();
+        State.media.ttsPaused = false;
+        ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
+        return;
+    }
+
+    if (State.media.ttsPlaying && window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+        State.media.ttsPaused = true;
+        ttsBtn.innerHTML = "▶️ Lanjutkan (Resume)";
+        return;
+    }
+
+    const selectEl = document.getElementById('p-select'); 
+    const val = selectEl.value; 
+    const selectedPidato = State.pidatoList.find(p => p.id === val); 
+    if (!selectedPidato) return; 
+    
+    window.speechSynthesis.cancel(); 
+    if (State.media.isRecording) togglePidato(); 
+    
+    const rawTxt = selectedPidato.teks; 
+    let phoneticText = " "; 
+    let wordIndices = []; 
+    let globalIdx = 0; 
+    let paragraphs = rawTxt.split('\n'); 
+    
+    paragraphs.forEach(p => { 
+        if(!p.trim()) { phoneticText += " \n "; return; } 
+        let words = p.split(/(\s+)/); 
+        words.forEach(w => { 
+            if(w.trim() === '') phoneticText += w; 
+            else { 
+                let phon = getPhonetic(w); 
+                let start = phoneticText.length; 
+                phoneticText += phon; 
+                let end = phoneticText.length; 
+                wordIndices.push({ originalIndex: globalIdx, start: start, end: end }); 
+                globalIdx++; 
+            } 
+        }); 
+        phoneticText += " \n "; 
+    }); 
+    
+    const utterance = new SpeechSynthesisUtterance(phoneticText); 
+    const voiceMode = document.getElementById('tts-voice-select').value; 
+    let selectedVoice = null; 
+    
+    if (State.media.ttsVoices.length > 0) { 
+        if (voiceMode === 'male') selectedVoice = State.media.ttsVoices.find(v => v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('ardi') || v.name.toLowerCase().includes('andika')); 
+        else if (voiceMode === 'female') selectedVoice = State.media.ttsVoices.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('gadis') || v.name.toLowerCase().includes('damayanti')); 
+    } 
+    if (selectedVoice) utterance.voice = selectedVoice; 
+    
+    utterance.lang = 'id-ID'; 
+    utterance.rate = 0.85; 
+    utterance.pitch = 0.95; 
+    
+    ttsBtn.innerHTML = "⏸️ Jeda (Pause)"; 
+    stopBtn.classList.remove('hidden');
+    State.media.ttsPlaying = true;
+    State.media.ttsPaused = false;
+    document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
+    
+    let manualHighlightTimer = null;
+    let currentManualIdx = 0;
+
+    utterance.onstart = () => {
+        if (!('onboundary' in utterance)) {
+            manualHighlightTimer = setInterval(() => {
+                if (currentManualIdx >= pidatoWords.length) { clearInterval(manualHighlightTimer); return; }
+                document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+                const span = document.getElementById(`pw-${currentManualIdx}`);
+                if (span) {
+                    span.classList.add('tts-active');
+                    const container = document.getElementById('p-text');
+                    const offset = span.offsetTop - container.offsetTop - 50;
+                    container.scrollTo({ top: offset, behavior: 'smooth' });
+                }
+                currentManualIdx++;
+            }, 500); 
+        }
+    };
+
+    utterance.onboundary = (event) => { 
+        if (event.name === 'word') { 
+            const charIdx = event.charIndex; 
+            const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); 
+            if (found) { 
+                document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
+                const span = document.getElementById(`pw-${found.originalIndex}`); 
+                if (span) {
+                    span.classList.add('tts-active'); 
+                    currentManualIdx = found.originalIndex + 1;
+                }
+            } 
+        } 
+    }; 
+    
+    utterance.onend = () => { 
+        ttsBtn.innerHTML = "🔊 Dengarkan Teks"; 
+        ttsBtn.disabled = false; 
+        stopBtn.classList.add('hidden');
+        State.media.ttsPlaying = false;
+        State.media.ttsPaused = false;
+        document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
+        if (manualHighlightTimer) clearInterval(manualHighlightTimer); 
+    }; 
+    
+    setTimeout(() => { window.speechSynthesis.speak(utterance); }, 250); 
+}
+
+function stopPidatoTTS() {
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        State.media.ttsPlaying = false;
+        State.media.ttsPaused = false;
+        
+        const ttsBtn = document.getElementById('pid-tts-btn');
+        const stopBtn = document.getElementById('pid-stop-btn');
+        if(ttsBtn) ttsBtn.innerHTML = "🔊 Dengarkan Teks";
+        if(stopBtn) stopBtn.classList.add('hidden');
+        
+        document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+    }
+}
+
 function levenshteinDistance(a, b) { const matrix = []; for (let i = 0; i <= b.length; i++) matrix[i] = [i]; for (let j = 0; j <= a.length; j++) matrix[0][j] = j; for (let i = 1; i <= b.length; i++) { for (let j = 1; j <= a.length; j++) { if (b.charAt(i - 1) === a.charAt(j - 1)) matrix[i][j] = matrix[i - 1][j - 1]; else matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1)); } } return matrix[b.length][a.length]; }
 function evaluatePidato(trans) { const spoken = trans.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g,"").split(/\s+/).filter(w => w.length > 0); pidatoWords.forEach((rw, i) => { let clean = rw.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g,""); if (clean.length < 3) return; const isMatched = spoken.some(sw => { if (sw.length < 3) return false; if (sw.includes(clean) || clean.includes(sw)) return true; const distance = levenshteinDistance(sw, clean); return (1 - (distance / Math.max(sw.length, clean.length))) >= 0.6; }); if (isMatched) { const el = document.getElementById(`pw-${i}`); if(el && !el.classList.contains('correct')) { el.classList.add('correct'); pidatoMatchCount++; } } }); }
 if(window.SpeechRecognition || window.webkitSpeechRecognition) { pidatoRecog = new (window.SpeechRecognition || window.webkitSpeechRecognition)(); pidatoRecog.lang = 'id-ID'; pidatoRecog.continuous = true; pidatoRecog.onresult = (e) => { let finalTrans = ''; for (let i = e.resultIndex; i < e.results.length; ++i) { if (e.results[i].isFinal) finalTrans += e.results[i][0].transcript + ' '; } if (finalTrans) evaluatePidato(finalTrans); }; pidatoRecog.onerror = (event) => { if(event.error === 'not-allowed') { alert("Akses mikrofon ditolak."); if(State.media.isRecording) togglePidato(); } }; }
-function togglePidato() { if(!pidatoRecog) return alert("Browser tidak mendukung mic."); const btn = document.getElementById('pid-btn'); if(State.media.isRecording) { pidatoRecog.stop(); State.media.isRecording = false; if(btn) { btn.innerText = "🎤 Mulai Baca"; btn.classList.replace('btn-danger', 'btn-primary'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.remove('active'); let wordCount = pidatoWords.length; let acc = wordCount > 0 ? Math.round((pidatoMatchCount / wordCount) * 100) : 0; State.scores.pidato = acc > 100 ? 100 : acc; saveScores(); const scoreEl = document.getElementById('p-score'); if(scoreEl) scoreEl.innerText = `Akurasi Pengucapan: ${State.scores.pidato}%`; } else { if(window.speechSynthesis) window.speechSynthesis.cancel(); State.media.isRecording = true; if(btn) { btn.innerText = "⏹️ Hentikan"; btn.classList.replace('btn-primary', 'btn-danger'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.add('active'); pidatoRecog.start(); } }
+function togglePidato() { if(!pidatoRecog) return alert("Browser tidak mendukung mic."); const btn = document.getElementById('pid-btn'); if(State.media.isRecording) { pidatoRecog.stop(); State.media.isRecording = false; if(btn) { btn.innerText = "🎤 Mulai Baca"; btn.classList.replace('btn-danger', 'btn-primary'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.remove('active'); let wordCount = pidatoWords.length; let acc = wordCount > 0 ? Math.round((pidatoMatchCount / wordCount) * 100) : 0; State.scores.pidato = acc > 100 ? 100 : acc; saveScores(); const scoreEl = document.getElementById('p-score'); if(scoreEl) scoreEl.innerText = `Akurasi Pengucapan: ${State.scores.pidato}%`; } else { if(window.speechSynthesis) window.speechSynthesis.cancel(); stopPidatoTTS(); State.media.isRecording = true; if(btn) { btn.innerText = "⏹️ Hentikan"; btn.classList.replace('btn-primary', 'btn-danger'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.add('active'); pidatoRecog.start(); } }
 
 // --- RAPAT (DRAMA DENGAN AVATAR) ---
 const AllDramaScripts = [
