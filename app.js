@@ -33,6 +33,12 @@ let pidatoWords = [];
 let pidatoMatchCount = 0;
 let presRecog = null;
 
+// Variabel Global untuk Sinkronisasi TTS
+let syncInterval = null;
+let speechStartTime = 0;
+let currentHighlightIndex = -1;
+let wordTimings = [];
+
 const saveScores = () => localStorage.setItem('dukuh_scores', JSON.stringify(State.scores));
 
 // ==========================================
@@ -154,7 +160,7 @@ function router() {
     if(window.speechSynthesis) { window.speechSynthesis.cancel(); }
     State.media.ttsPlaying = false;
     State.media.ttsPaused = false;
-    if (window.fallbackTimer) { clearTimeout(window.fallbackTimer); window.fallbackTimer = null; }
+    if (syncInterval) { cancelAnimationFrame(syncInterval); syncInterval = null; }
     
     if(pidatoRecog && State.media.isRecording) { try { pidatoRecog.stop(); } catch(e){} State.media.isRecording = false; }
     if(presRecog && State.media.isRecording) { try { presRecog.stop(); } catch(e){} State.media.isRecording = false; }
@@ -1021,7 +1027,7 @@ if(window.SpeechRecognition || window.webkitSpeechRecognition) {
 }
 function togglePres() { if(!presRecog) return alert("Browser tidak mendukung mic."); const btn = document.getElementById('pres-btn'); if(State.media.isRecording) { presRecog.stop(); State.media.isRecording = false; if(btn) { btn.innerText = "🎤 Mulai Bicara (Rekam Nilai)"; btn.classList.replace('btn-danger', 'btn-warning'); } const rec = document.getElementById('pres-rec'); if(rec) rec.classList.remove('active'); const count = Object.values(State.media.keywords).filter(v=>v).length; State.scores.presentasi = Math.round((count/4)*100); saveScores(); alert(`Presentasi Selesai! Kata kunci disebut: ${count}/4. Skor: ${State.scores.presentasi}`); window.location.hash = '#/dashboard'; } else { State.media.keywords = {}; State.media.isRecording = true; if(btn) { btn.innerText = "⏹️ Hentikan Presentasi"; btn.classList.replace('btn-warning', 'btn-danger'); } const rec = document.getElementById('pres-rec'); if(rec) rec.classList.add('active'); presRecog.start(); let time = 180; const timerEl = document.getElementById('ppt-timer'); const interval = setInterval(() => { time--; let m = parseInt(time / 60); let s = parseInt(time % 60); if(timerEl) timerEl.innerText = `⏱️ Sisa Waktu: 0${m}:${s < 10 ? '0'+s : s}`; if(time <= 0 || !State.media.isRecording) { clearInterval(interval); if(State.media.isRecording) togglePres(); } }, 1000); } }
 
-// --- PIDATO JAWA ---
+// --- PIDATO JAWA (TTS & SPEECH RECOGNITION) ---
 function populateVoices() { 
     if (!('speechSynthesis' in window)) return; 
     const loadVoices = () => { 
@@ -1043,9 +1049,10 @@ function playPidatoTTS() {
         window.speechSynthesis.resume();
         State.media.ttsPaused = false;
         ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
-        if (!window.isBoundarySupported) {
-            window.fallbackTimer = setTimeout(window.runFallbackHighlight, 50); 
+        if (currentHighlightIndex !== -1 && wordTimings[currentHighlightIndex]) {
+            speechStartTime = Date.now() - wordTimings[currentHighlightIndex].start;
         }
+        syncInterval = requestAnimationFrame(syncHighlight);
         return;
     }
 
@@ -1053,10 +1060,7 @@ function playPidatoTTS() {
         window.speechSynthesis.pause();
         State.media.ttsPaused = true;
         ttsBtn.innerHTML = "▶️ Lanjutkan (Resume)";
-        if (window.fallbackTimer) {
-            clearTimeout(window.fallbackTimer);
-            window.fallbackTimer = null;
-        }
+        if (syncInterval) cancelAnimationFrame(syncInterval);
         return;
     }
 
@@ -1131,47 +1135,63 @@ function playPidatoTTS() {
     State.media.ttsPaused = false;
     document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
     
-    window.currentManualIdx = 0;
-    window.isBoundarySupported = false;
+    wordTimings = [];
+    let cumulativeTime = 0;
+    const rateFactor = 1 / (utterance.rate || 0.85);
 
-    window.runFallbackHighlight = function() {
-        if (!State.media.ttsPlaying || State.media.ttsPaused || window.isBoundarySupported) return;
-        if (window.currentManualIdx >= pidatoWords.length) return;
+    pidatoWords.forEach((word) => {
+        let duration = (120 + (word.length * 40)) * rateFactor; 
+        if (word.match(/[.,;:]/)) duration += (250 * rateFactor); 
+        if (word.match(/[.!?]/)) duration += (500 * rateFactor); 
+        wordTimings.push({ start: cumulativeTime, end: cumulativeTime + duration });
+        cumulativeTime += duration;
+    });
 
-        document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
-        const span = document.getElementById(`pw-${window.currentManualIdx}`);
-        if (span) {
-            span.classList.add('tts-active');
-            const container = document.getElementById('p-text');
-            const offset = span.offsetTop - container.offsetTop - 50;
-            container.scrollTo({ top: offset, behavior: 'smooth' });
-        }
+    currentHighlightIndex = -1;
 
-        let currentWord = pidatoWords[window.currentManualIdx];
-        // Sync lebih cepat: 120ms dasar + 60ms per huruf
-        let delay = 120 + (currentWord.length * 60); 
+    function syncHighlight() {
+        if (!State.media.ttsPlaying || State.media.ttsPaused) return;
         
-        if (currentWord.match(/[.,;:]/)) delay += 200; 
-        if (currentWord.match(/[.!?]/)) delay += 400; 
-
-        window.currentManualIdx++;
-        window.fallbackTimer = setTimeout(window.runFallbackHighlight, delay);
-    };
+        let elapsed = Date.now() - speechStartTime;
+        let newIdx = -1;
+        
+        for (let i = 0; i < wordTimings.length; i++) {
+            if (elapsed >= wordTimings[i].start && elapsed < wordTimings[i].end) {
+                newIdx = i;
+                break;
+            }
+        }
+        
+        if (newIdx !== -1 && newIdx !== currentHighlightIndex) {
+            document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+            const span = document.getElementById(`pw-${newIdx}`);
+            if (span) {
+                span.classList.add('tts-active');
+                const container = document.getElementById('p-text');
+                const offset = span.offsetTop - container.offsetTop - 50;
+                container.scrollTo({ top: offset, behavior: 'smooth' });
+            }
+            currentHighlightIndex = newIdx;
+        }
+        
+        syncInterval = requestAnimationFrame(syncHighlight);
+    }
 
     utterance.onstart = () => {
-        if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
-        window.fallbackTimer = setTimeout(window.runFallbackHighlight, 50);
+        setTimeout(() => {
+            speechStartTime = Date.now();
+            syncInterval = requestAnimationFrame(syncHighlight);
+        }, 250);
     };
 
     utterance.onboundary = (event) => { 
         if (event.name === 'word') { 
-            window.isBoundarySupported = true; 
-            if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
-            
             const charIdx = event.charIndex; 
             const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); 
             if (found) { 
-                window.currentManualIdx = found.originalIndex;
+                speechStartTime = Date.now() - wordTimings[found.originalIndex].start;
+                currentHighlightIndex = found.originalIndex;
+                
                 document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
                 const span = document.getElementById(`pw-${found.originalIndex}`); 
                 if (span) {
@@ -1190,11 +1210,11 @@ function playPidatoTTS() {
         stopBtn.classList.add('hidden');
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
-        if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
+        if (syncInterval) cancelAnimationFrame(syncInterval);
         document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
     }; 
     
-    setTimeout(() => { window.speechSynthesis.speak(utterance); }, 250); 
+    setTimeout(() => { window.speechSynthesis.speak(utterance); }, 150); 
 }
 
 function stopPidatoTTS() {
@@ -1203,9 +1223,9 @@ function stopPidatoTTS() {
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
         
-        if (window.fallbackTimer) {
-            clearTimeout(window.fallbackTimer);
-            window.fallbackTimer = null;
+        if (syncInterval) {
+            cancelAnimationFrame(syncInterval);
+            syncInterval = null;
         }
         
         const ttsBtn = document.getElementById('pid-tts-btn');
