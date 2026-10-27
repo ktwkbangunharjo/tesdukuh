@@ -754,18 +754,60 @@ function finishQuiz() {
     alert(`Ujian Selesai! Skor Anda: ${State.scores.kuis}`); 
 }
 
-// --- TES PSIKOLOGI ---
+// --- TES PSIKOLOGI (50 SOAL APMD) ---
 const PsikoData = [
-    { q: "Anda mendapati dua warga bersitegang masalah batas tanah. Warga A membawa parang, Warga B bersikeras tanahnya diambil. Apa tindakan pertama Anda?", opts: ["Membiarkan mereka menyelesaikan sendiri.", "Mendekati Warga A dengan tenang, meminta parangnya diturunkan, lalu memisahkan mereka.", "Memarahi keduanya karena telah membuat keributan."], ans: 1 },
-    { q: "Ada tawaran proyek dari pihak swasta. Mereka menawarkan 'uang pelicin' agar dipermudah. Sebagai Dukuh, Anda...", opts: ["Menerima uang untuk kas padukuhan.", "Menolak tegas dan menjelaskan bahwa semua harus sesuai prosedur.", "Menerima uangnya, tapi diam-diam tidak melaporkan proyek."], ans: 1 },
-    { q: "Anda memiliki 3 agenda mendesak: 1) Rapat penting di Kapanewon, 2) Warga sakit butuh rujukan, 3) Ada tamu dari Dinas. Prioritas Anda?", opts: ["Mendelegasikan urusan warga, saya pergi ke rapat.", "Membatalkan semua agenda dan menangani warga sakit.", "Menugaskan staf mengurus warga sakit, lalu minta izin telat rapat."], ans: 1 },
-    { q: "Proyek jembatan gagal karena kontraktor kabur. Warga sangat marah dan menuntut Anda bertanggung jawab. Anda...", opts: ["Menyalahkan kontraktor sepenuhnya.", "Meminta maaf atas kelalaian pengawasan, menjelaskan kronologinya, dan berjanji mencari solusi.", "Menghindari warga sampai situasi mereda."], ans: 1 },
-    { q: "Warga kaya dan berpengaruh meminta izin memotong jalan lingkungan demi memperluas rumahnya. Warga lain resah. Anda...", opts: ["Mengizinkan karena dia sering menyumbang.", "Menolak tegas karena jalan umum tidak boleh diprivatisasi.", "Mengizinkan tapi meminta uang kompensasi."], ans: 1 },
-    { q: "Pemuda di padukuhan sering mabuk-mabukan. Mereka menolak diberi teguran. Anda...", opts: ["Melaporkan ke polisi agar ditangkap.", "Mendekati secara personal, mengajak ngobrol, dan menawarkan wadah Karang Taruna.", "Membiarkan saja karena mereka akan sadar sendiri."], ans: 1 },
-    { q: "Warga RT 01 dan RT 02 berselisih soal jadwal ronda. RT 01 merasa RT 02 tidak disiplin. Anda...", opts: ["Memarahi RT 02 dan membela RT 01.", "Mempertemukan kedua ketua RT, mendengarkan keluhan, dan menyusun ulang jadwal adil.", "Membiarkan saja karena itu urusan internal antar RT."], ans: 1 },
-    { q: "Ada laporan staf Anda melakukan pungli (pungutan liar) kepada warga.", opts: ["Langsung memecat staf tersebut.", "Memanggil staf terkait, melakukan klarifikasi internal, dan mencari bukti.", "Mengabaikan laporan karena takut gaduh."], ans: 1 },
-    { q: "Musim kemarau menyebabkan sumur warga kering. Dana terbatas. Anda...", opts: ["Meminta warga menampung air hujan.", "Bersama warga gotong royong mencari sumber mata air / sumur bor.", "Menyalahkan cuaca dan meminta warga bersabar."], ans: 1 },
-    { q: "Tokoh masyarakat sering mengkritik kebijakan Anda di depan umum.", opts: ["Mengucilkan tokoh tersebut.", "Mengajaknya berdiskusi secara pribadi (empat mata) untuk mencari titik temu.", "Membalas kritikannya dengan kritik yang lebih keras."], ans: 1 }
+    // --- LOGIKA & PERUMPAMAAN ---
+    { q: "Semua Dukuh adalah pemimpin. Sebagian pemimpin adalah pendengar yang baik. Maka...", opts: ["Semua Dukuh pendengar yang baik.", "Sebagian Dukuh adalah pendengar yang baik.", "Tidak ada Dukuh yang pendengar baik.", "Semua pendengar baik adalah Dukuh."], ans: 1 },
+    { q: "Jika hujan turun, jalan menjadi basah. Jalan tidak basah. Kesimpulannya...", opts: ["Hujan turun.", "Hujan tidak turun.", "Jalan tetap kering.", "Tidak bisa disimpulkan."], ans: 1 },
+    { q: "Analogi: Dokter : Rumah Sakit = Petani : ...", opts: ["Cangkul", "Sawah", "Padi", "Traktor"], ans: 1 },
+    { q: "Analogi: Kepala Dukuh : Padukuhan = Lurah : ...", opts: ["Kecamatan", "Kalurahan", "Kabupaten", "Provinsi"], ans: 1 },
+    { q: "Semua A adalah B. Semua B adalah C. Maka...", opts: ["Semua C adalah A.", "Semua A adalah C.", "Sebagian C adalah A.", "Tidak ada kesimpulan."], ans: 1 },
+    { q: "Andi lebih tua dari Budi. Budi lebih tua dari Cici. Siapa yang paling muda?", opts: ["Andi", "Budi", "Cici", "Tidak tahu"], ans: 2 },
+    { q: "Jika 3 ekor sapi memakan rumput 3 lapangan dalam 3 hari. Berapa lapangan yang dimakan 6 sapi dalam 6 hari?", opts: ["6 lapangan", "9 lapangan", "12 lapangan", "18 lapangan"], ans: 2 },
+    { q: "Buku A lebih tebal dari Buku B. Buku C lebih tipis dari Buku A. Buku B lebih tebal dari Buku C. Siapa yang paling tebal?", opts: ["Buku A", "Buku B", "Buku C", "Buku D"], ans: 0 },
+    { q: "Analogi: Uang : Dompet = Air : ...", opts: ["Gelas", "Minum", "Haus", "Hujan"], ans: 0 },
+    { q: "Anda melihat 5 burung di pohon. Anda menembak 1. Berapa sisa burung di pohon?", opts: ["4", "1", "0", "5"], ans: 2 },
+    { q: "Sebuah jam dinding berdentang 6 kali dalam 5 detik. Berapa waktu yang dibutuhkan untuk berdentang 12 kali?", opts: ["10 detik", "11 detik", "12 detik", "15 detik"], ans: 1 },
+    { q: "Analogi: Rumah : Atap = Tubuh : ...", opts: ["Kaki", "Tangan", "Kepala", "Rambut"], ans: 2 },
+    { q: "Jika Anda berjalan 10 meter ke utara, lalu 10 meter ke selatan. Di mana posisi Anda?", opts: ["10 meter dari awal", "Di tempat awal", "20 meter dari awal", "Tidak tahu"], ans: 1 },
+    { q: "Semua bunga mawar berwarna merah. Sebagian bunga di taman adalah mawar. Maka...", opts: ["Semua bunga di taman merah.", "Sebagian bunga di taman merah.", "Tidak ada bunga merah.", "Semua merah adalah mawar."], ans: 1 },
+    { q: "Mana yang tidak sekelompok?", opts: ["Apel", "Jeruk", "Mangga", "Wortel"], ans: 3 },
+    { q: "Mana yang tidak sekelompok?", opts: ["Dukuh", "Lurah", "Bupati", "Guru"], ans: 3 },
+    { q: "Kebalikan dari 'Abadi' adalah...", opts: ["Kekal", "Fana", "Lestari", "Awet"], ans: 1 },
+    { q: "Kebalikan dari 'Sederhana' adalah...", opts: ["Mewah", "Kaya", "Boros", "Hemat"], ans: 0 },
+    { q: "Analogi: Buku : Halaman = Tangga : ...", opts: ["Kayu", "Anak Tangga", "Rumah", "Bangunan"], ans: 1 },
+    { q: "Jika P > Q dan Q > R, maka...", opts: ["P < R", "P > R", "P = R", "R > P"], ans: 1 },
+
+    // --- SIKAP & SOAL CERITA (SJT) ---
+    { q: "Anda mendapati dua warga bersitegang masalah batas tanah. Warga A membawa parang. Apa tindakan pertama Anda?", opts: ["Membiarkan mereka.", "Mendekati Warga A dengan tenang, meminta parangnya diturunkan, lalu memisahkan mereka.", "Memarahi keduanya."], ans: 1 },
+    { q: "Ada tawaran proyek dari pihak swasta. Mereka menawarkan 'uang pelicin'. Sebagai Dukuh, Anda...", opts: ["Menerima uang untuk kas padukuhan.", "Menolak tegas dan menjelaskan bahwa semua harus sesuai prosedur.", "Menerima uangnya diam-diam."], ans: 1 },
+    { q: "Anda memiliki 3 agenda mendesak: 1) Rapat di Kapanewon, 2) Warga sakit, 3) Tamu Dinas. Prioritas Anda?", opts: ["Mendelegasikan urusan warga, pergi ke rapat.", "Membatalkan semua agenda dan menangani warga sakit.", "Menugaskan staf mengurus warga sakit, lalu minta izin telat rapat."], ans: 1 },
+    { q: "Proyek jembatan gagal karena kontraktor kabur. Warga sangat marah. Anda...", opts: ["Menyalahkan kontraktor.", "Meminta maaf, menjelaskan kronologinya, dan berjanji mencari solusi.", "Menghindari warga."], ans: 1 },
+    { q: "Warga kaya meminta izin memotong jalan lingkungan demi memperluas rumah. Warga lain resah. Anda...", opts: ["Mengizinkan karena dia menyumbang.", "Menolak tegas karena jalan umum tidak boleh diprivatisasi.", "Mengizinkan tapi minta uang kompensasi."], ans: 1 },
+    { q: "Pemuda di padukuhan sering mabuk-mabukan. Anda...", opts: ["Melaporkan ke polisi.", "Mendekati secara personal dan menawarkan wadah Karang Taruna.", "Membiarkan saja."], ans: 1 },
+    { q: "Warga RT 01 dan RT 02 berselisih soal jadwal ronda. Anda...", opts: ["Memarahi RT 02.", "Mempertemukan kedua ketua RT dan menyusun ulang jadwal adil.", "Membiarkan saja."], ans: 1 },
+    { q: "Ada laporan staf Anda melakukan pungli (pungutan liar).", opts: ["Langsung memecat staf.", "Memanggil staf, klarifikasi internal, dan mencari bukti.", "Mengabaikan laporan."], ans: 1 },
+    { q: "Musim kemarau menyebabkan sumur warga kering. Dana terbatas. Anda...", opts: ["Meminta warga menampung air hujan.", "Bersama warga gotong royong mencari sumber mata air.", "Menyalahkan cuaca."], ans: 1 },
+    { q: "Tokoh masyarakat sering mengkritik kebijakan Anda di depan umum.", opts: ["Mengucilkan tokoh tersebut.", "Mengajaknya berdiskusi secara pribadi (empat mata).", "Membalas kritikannya."], ans: 1 },
+    { q: "Anda melihat warga membuang sampah ke sungai. Tindakan Anda?", opts: ["Membiarkan karena itu hak warga.", "Menegur dengan sopan dan mengingatkan tentang banjir.", "Melaporkan langsung ke polisi."], ans: 1 },
+    { q: "Warga meminta bantuan dana untuk hajatan, namun kas padukuhan kosong. Anda...", opts: ["Memberikan janji palsu.", "Menjelaskan kondisi kas secara transparan dan menawarkan bantuan tenaga.", "Memarahi warga karena meminta terus."], ans: 1 },
+    { q: "Saat rapat, ada warga yang terus memotong pembicaraan Anda. Anda...", opts: ["Membentaknya.", "Mempersilakannya bicara dulu, lalu menanggapi dengan tenang.", "Mengabaikannya."], ans: 1 },
+    { q: "Anda dihadapkan pada dua warga yang berebut bantuan sosial. Anda...", opts: ["Membaginya dua secara paksa.", "Mengecek data TKSK siapa yang lebih berhak.", "Mengembalikan uang ke pemerintah."], ans: 1 },
+    { q: "Seorang warga meminta Anda memalsukan surat keterangan miskin. Anda...", opts: ["Menuruti karena kasihan.", "Menolak tegas karena melanggar hukum.", "Meminta uang imbalan."], ans: 1 },
+    { q: "Pemuda padukuhan ingin membuat kegiatan yang berisiko (balap liar). Anda...", opts: ["Mengizinkan.", "Mengarahkan mereka ke kegiatan positif/olahraga resmi.", "Melarang tanpa penjelasan."], ans: 1 },
+    { q: "Warga lansia mengeluh kesulitan mengambil bantuan. Anda...", opts: ["Menyuruhnya mengambil sendiri.", "Mengantarkan bantuan langsung ke rumahnya.", "Meminta RT yang mengurus."], ans: 1 },
+    { q: "Ada tawaran menjadi pengurus partai politik tertentu. Sebagai Dukuh, Anda...", opts: ["Menerima untuk mencari kekuatan.", "Menolak karena Dukuh harus netral.", "Menerima diam-diam."], ans: 1 },
+    { q: "Warga Anda ada yang meninggal tapi tidak ada ahli waris. Anda...", opts: ["Membiarkan jenazah terbengkalai.", "Mengkoordinasi pemakaman secara kekeluargaan dan adat.", "Melaporkan ke media sosial."], ans: 1 },
+    { q: "Anda salah mengeluarkan kebijakan yang membuat warga rugi. Anda...", opts: ["Menyalahkan staf.", "Meminta maaf secara terbuka dan segera memperbaiki kesalahan.", "Pura-pura tidak tahu."], ans: 1 },
+    { q: "Saat Anda berbicara di forum, ada warga yang menertawakan Anda. Anda...", opts: ["Marah dan meninggalkan forum.", "Tetap tenang dan melanjutkan pembicaraan.", "Membalas dengan ejekan."], ans: 1 },
+    { q: "Bantuan sembako dari pemerintah datang terlambat. Warga marah. Anda...", opts: ["Menyalahkan pemerintah pusat.", "Menjelaskan proses pengiriman dan meredakan emosi warga.", "Bersembunyi di rumah."], ans: 1 },
+    { q: "Staf Anda bekerja lambat. Anda...", opts: ["Memarahinya di depan umum.", "Menegurnya secara pribadi dan mencari tahu kendalanya.", "Menggantikannya."], ans: 1 },
+    { q: "Warga ingin menjual tanah warisan untuk berfoya-foya. Anda...", opts: ["Membiarkan.", "Mengingatkan agar uang digunakan untuk hal produktif.", "Meminta bagian."], ans: 1 },
+    { q: "Ada warga baru yang belum melapor ke RT. Anda...", opts: ["Mengusirnya.", "Mendatangi dan meminta melengkapi administrasi dengan ramah.", "Mengabaikannya."], ans: 1 },
+    { q: "Anda diminta memimpin doa di acara lintas agama. Anda...", opts: ["Menolak.", "Memberikan kesempatan pemuka agama untuk memimpin doa.", "Memaksa doa sesuai agama Anda."], ans: 1 },
+    { q: "Anggota keluarga Anda ingin diprioritaskan dalam proyek padukuhan. Anda...", opts: ["Memprioritaskannya.", "Menolak dan tetap profesional sesuai aturan.", "Memberi jatah kecil."], ans: 1 },
+    { q: "Warga mengeluh jalan rusak. Anda belum punya dana. Anda...", opts: ["Berdiam diri.", "Mengajak gotong royong sementara dan mengusulkan dana ke Kalurahan.", "Menyalahkan cuaca."], ans: 1 },
+    { q: "Seorang warga meminta Anda menjadi juru damai masalah keluarga, tapi Anda tidak sanggup. Anda...", opts: ["Memaksakan diri.", "Merujuk ke pihak yang lebih ahli (psikolog/tokoh agama).", "Mengabaikannya."], ans: 1 }
 ];
 
 function startPsikologi() {
@@ -796,7 +838,8 @@ function answerPsikologi(idx, btn) {
 
     if (idx === q.ans) {
         btn.classList.add('correct');
-        State.psikologi.score += 10; 
+        // 50 Soal, skor per soal = 100/50 = 2
+        State.psikologi.score += 2; 
     } else {
         btn.classList.add('wrong');
         opts[q.ans].classList.add('correct');
@@ -821,11 +864,53 @@ function finishPsikologi() {
     alert(`Tes Psikologi Selesai! Skor Anda: ${State.scores.psikologi}`);
 }
 
-// --- WAWANCARA ---
+// --- WAWANCARA (5 SOAL APMD) ---
 const InterviewData = [
-    { q: "Sebagai Dukuh, Anda dihadapkan pada konflik batas tanah antarwarga yang sudah bertahun-tahun tidak selesai. Apa langkah pertama Anda?", opts: ["Membiarkannya karena itu urusan pribadi.", "Memanggil kedua belah pihak, mendengarkan keluhan, dan memediasi dengan bukti kepemilikan.", "Langsung menyerahkannya ke pihak kepolisian."], ans: 1 },
-    { q: "Bagaimana strategi Anda memastikan data kemiskinan akurat untuk penyaluran Bansos?", opts: ["Hanya menggunakan data lama dari RT.", "Melakukan musyawarah desa dan kunjungan lapangan (cek fisik) bersama TKSK.", "Membagikan jatah secara rata agar tidak ada protes."], ans: 1 },
-    { q: "Jika ada warga yang ingin menjual tanah Kasultanan (Duluwung), tindakan Anda?", opts: ["Mempersilakan karena hak waris.", "Membiarkan transaksi berjalan.", "Mencegahnya, mengedukasi hukum pertanahan DIY, dan lapor ke Panewu."], ans: 2 }
+    { 
+        q: "Menurut Anda, apa VISI dan MISI utama yang harus dibawa untuk memajukan Padukuhan ini 5 tahun ke depan?", 
+        opts: [
+            "Fokus pada pembangunan fisik jalan dan jembatan saja.",
+            "Pemberdayaan SDM (Pemuda & UMKM) serta digitalisasi layanan padukuhan.",
+            "Mengikuti semua program pemerintah tanpa inovasi."
+        ], 
+        ans: 1 
+    },
+    { 
+        q: "Apa alasan utama dan motivasi terbesar Anda mencalonkan diri sebagai Pamong Dukuh (Dukuh)?", 
+        opts: [
+            "Ingin memiliki kekuasaan dan mempermudah urusan pribadi.",
+            "Ingin mengabdi dan membantu menyelesaikan permasalahan warga secara langsung.",
+            "Karena diminta oleh teman dan tidak ada pekerjaan lain."
+        ], 
+        ans: 1 
+    },
+    { 
+        q: "Sebutkan kelebihan (hard skill & soft skill) yang Anda miliki yang membuat Anda layak dipilih sebagai Dukuh!", 
+        opts: [
+            "Kaya raya dan bisa membiayai kegiatan sendiri.",
+            "Mampu berkomunikasi baik, berjiwa pemimpin, dan paham administrasi pemerintahan.",
+            "Punya banyak massa pendukung."
+        ], 
+        ans: 1 
+    },
+    { 
+        q: "Bagaimana tanggapan Anda jika ada warga yang menolak program kerja Anda di forum rapat?", 
+        opts: [
+            "Tetap melaksanakan program karena saya yang berkuasa.",
+            "Mendengarkan alasannya, berdiskusi mencari titik temu, dan transparan terkait tujuan program.",
+            "Mengeluarkan warga tersebut dari forum."
+        ], 
+        ans: 1 
+    },
+    { 
+        q: "Apabila Anda terpilih menjadi Dukuh, langkah konkret pertama apa yang akan Anda lakukan di bulan pertama?", 
+        opts: [
+            "Merombak semua staf dan perangkat desa.",
+            "Melakukan pendataan ulang warga, evaluasi program lama, dan silaturahmi ke RT/RW.",
+            "Menaikkan iuran bulanan warga."
+        ], 
+        ans: 1 
+    }
 ];
 
 function startWawancara() {
@@ -875,7 +960,7 @@ function answerWawancara(idx, btn) {
 
     if (idx === q.ans) {
         btn.classList.add('correct');
-        State.wawancara.score += 33; 
+        State.wawancara.score += 20; // 5 soal x 20 = 100
     } else {
         btn.classList.add('wrong');
         opts[q.ans].classList.add('correct');
