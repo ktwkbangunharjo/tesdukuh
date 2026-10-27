@@ -149,7 +149,6 @@ const routes = {
 };
 
 function router() {
-    // Cleanup timers & media saat pindah menu
     if(State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
     if(State.office.wordTimer) { clearInterval(State.office.wordTimer); State.office.wordTimer = null; }
     if(State.office.excelTimer) { clearInterval(State.office.excelTimer); State.office.excelTimer = null; }
@@ -1050,7 +1049,7 @@ function playPidatoTTS() {
         State.media.ttsPaused = false;
         ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
         if (currentHighlightIndex !== -1 && wordTimings[currentHighlightIndex]) {
-            speechStartTime = Date.now() - wordTimings[currentHighlightIndex].start;
+            speechStartTime = performance.now() - wordTimings[currentHighlightIndex].start;
         }
         syncInterval = requestAnimationFrame(syncHighlight);
         return;
@@ -1135,14 +1134,16 @@ function playPidatoTTS() {
     State.media.ttsPaused = false;
     document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
     
+    // --- KALKULASI WAKTU KONSERVATIF (ANTI MENDAHULUI SUARA) ---
     wordTimings = [];
     let cumulativeTime = 0;
     const rateFactor = 1 / (utterance.rate || 0.85);
 
     pidatoWords.forEach((word) => {
-        let duration = (120 + (word.length * 40)) * rateFactor; 
-        if (word.match(/[.,;:]/)) duration += (250 * rateFactor); 
-        if (word.match(/[.!?]/)) duration += (500 * rateFactor); 
+        // 250ms dasar + 60ms per huruf (sangat lambat, agar suara tidak didahului)
+        let duration = (250 + (word.length * 60)) * rateFactor; 
+        if (word.match(/[.,;:]/)) duration += (300 * rateFactor); 
+        if (word.match(/[.!?]/)) duration += (600 * rateFactor); 
         wordTimings.push({ start: cumulativeTime, end: cumulativeTime + duration });
         cumulativeTime += duration;
     });
@@ -1152,16 +1153,19 @@ function playPidatoTTS() {
     function syncHighlight() {
         if (!State.media.ttsPlaying || State.media.ttsPaused) return;
         
-        let elapsed = Date.now() - speechStartTime;
+        // Gunakan performance.now() untuk presisi tinggi
+        let elapsed = performance.now() - speechStartTime;
         let newIdx = -1;
         
         for (let i = 0; i < wordTimings.length; i++) {
-            if (elapsed >= wordTimings[i].start && elapsed < wordTimings[i].end) {
+            if (elapsed >= wordTimings[i].start) {
                 newIdx = i;
+            } else {
                 break;
             }
         }
         
+        // Jika suara ternyata lebih cepat, onboundary yang akan mengoreksi
         if (newIdx !== -1 && newIdx !== currentHighlightIndex) {
             document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
             const span = document.getElementById(`pw-${newIdx}`);
@@ -1178,18 +1182,21 @@ function playPidatoTTS() {
     }
 
     utterance.onstart = () => {
+        // Beri waktu 300ms untuk mesin TTS memuat audio awal
         setTimeout(() => {
-            speechStartTime = Date.now();
+            speechStartTime = performance.now();
             syncInterval = requestAnimationFrame(syncHighlight);
-        }, 250);
+        }, 300);
     };
 
+    // --- AUTO-KOREKSI PAKSA (Jika onboundary didukung) ---
     utterance.onboundary = (event) => { 
         if (event.name === 'word') { 
             const charIdx = event.charIndex; 
             const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); 
             if (found) { 
-                speechStartTime = Date.now() - wordTimings[found.originalIndex].start;
+                // Paksa sinkronisasi waktu saat ini dengan index kata dari browser
+                speechStartTime = performance.now() - wordTimings[found.originalIndex].start;
                 currentHighlightIndex = found.originalIndex;
                 
                 document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
