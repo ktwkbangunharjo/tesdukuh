@@ -143,6 +143,7 @@ const routes = {
 };
 
 function router() {
+    // Cleanup timers & media saat pindah menu
     if(State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
     if(State.office.wordTimer) { clearInterval(State.office.wordTimer); State.office.wordTimer = null; }
     if(State.office.excelTimer) { clearInterval(State.office.excelTimer); State.office.excelTimer = null; }
@@ -153,7 +154,7 @@ function router() {
     if(window.speechSynthesis) { window.speechSynthesis.cancel(); }
     State.media.ttsPlaying = false;
     State.media.ttsPaused = false;
-    if (window.manualHighlightTimer) { clearInterval(window.manualHighlightTimer); window.manualHighlightTimer = null; }
+    if (window.fallbackTimer) { clearTimeout(window.fallbackTimer); window.fallbackTimer = null; }
     
     if(pidatoRecog && State.media.isRecording) { try { pidatoRecog.stop(); } catch(e){} State.media.isRecording = false; }
     if(presRecog && State.media.isRecording) { try { presRecog.stop(); } catch(e){} State.media.isRecording = false; }
@@ -949,8 +950,8 @@ function playPidatoTTS() {
         window.speechSynthesis.resume();
         State.media.ttsPaused = false;
         ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
-        if (window.manualHighlightTimer) {
-            window.manualHighlightTimer = setInterval(highlightNextWord, 450);
+        if (!window.isBoundarySupported) {
+            window.fallbackTimer = setTimeout(runFallbackHighlight, 100);
         }
         return;
     }
@@ -959,9 +960,9 @@ function playPidatoTTS() {
         window.speechSynthesis.pause();
         State.media.ttsPaused = true;
         ttsBtn.innerHTML = "▶️ Lanjutkan (Resume)";
-        if (window.manualHighlightTimer) {
-            clearInterval(window.manualHighlightTimer);
-            window.manualHighlightTimer = null;
+        if (window.fallbackTimer) {
+            clearTimeout(window.fallbackTimer);
+            window.fallbackTimer = null;
         }
         return;
     }
@@ -1015,16 +1016,15 @@ function playPidatoTTS() {
     stopBtn.classList.remove('hidden');
     State.media.ttsPlaying = true;
     State.media.ttsPaused = false;
-    
     document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
     
     window.currentManualIdx = 0;
+    window.isBoundarySupported = false;
 
-    window.highlightNextWord = function() {
-        if (window.currentManualIdx >= pidatoWords.length) {
-            clearInterval(window.manualHighlightTimer);
-            return;
-        }
+    window.runFallbackHighlight = function() {
+        if (!State.media.ttsPlaying || State.media.ttsPaused || window.isBoundarySupported) return;
+        if (window.currentManualIdx >= pidatoWords.length) return;
+
         document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
         const span = document.getElementById(`pw-${window.currentManualIdx}`);
         if (span) {
@@ -1033,21 +1033,30 @@ function playPidatoTTS() {
             const offset = span.offsetTop - container.offsetTop - 50;
             container.scrollTo({ top: offset, behavior: 'smooth' });
         }
+
+        let currentWord = pidatoWords[window.currentManualIdx];
+        let delay = 200 + (currentWord.length * 80); 
+        if (currentWord.match(/[.,;:]/)) delay += 300; 
+        if (currentWord.match(/[.!?]/)) delay += 600; 
+
         window.currentManualIdx++;
-    }
+        window.fallbackTimer = setTimeout(window.runFallbackHighlight, delay);
+    };
 
     utterance.onstart = () => {
-        if (window.manualHighlightTimer) clearInterval(window.manualHighlightTimer);
-        window.manualHighlightTimer = setInterval(window.highlightNextWord, 450);
+        if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
+        window.fallbackTimer = setTimeout(window.runFallbackHighlight, 100);
     };
 
     utterance.onboundary = (event) => { 
         if (event.name === 'word') { 
+            window.isBoundarySupported = true; 
+            if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
+            
             const charIdx = event.charIndex; 
             const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); 
             if (found) { 
                 window.currentManualIdx = found.originalIndex;
-                
                 document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
                 const span = document.getElementById(`pw-${found.originalIndex}`); 
                 if (span) {
@@ -1066,7 +1075,7 @@ function playPidatoTTS() {
         stopBtn.classList.add('hidden');
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
-        if (window.manualHighlightTimer) clearInterval(window.manualHighlightTimer);
+        if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
         document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
     }; 
     
@@ -1079,9 +1088,9 @@ function stopPidatoTTS() {
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
         
-        if (window.manualHighlightTimer) {
-            clearInterval(window.manualHighlightTimer);
-            window.manualHighlightTimer = null;
+        if (window.fallbackTimer) {
+            clearTimeout(window.fallbackTimer);
+            window.fallbackTimer = null;
         }
         
         const ttsBtn = document.getElementById('pid-tts-btn');
