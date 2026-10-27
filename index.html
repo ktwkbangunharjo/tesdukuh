@@ -11,36 +11,62 @@
 
     <style>
         :root {
-            --primary: #4f46e5; --primary-hover: #4338ca; --primary-light: #e0e7ff;
+            /* Palet Warna Modern */
+            --primary: #4f46e5; 
+            --primary-hover: #4338ca; 
+            --primary-light: #e0e7ff;
             --secondary: #64748b;
-            --success: #10b981; --success-light: #d1fae5;
-            --danger: #ef4444; --danger-light: #fee2e2;
-            --warning: #f59e0b; --warning-light: #fef3c7;
-            --bg-main: #f1f5f9; --bg-card: #ffffff; --bg-glass: rgba(255, 255, 255, 0.85);
-            --text-main: #0f172a; --text-muted: #64748b; --border: #e2e8f0;
+            --success: #10b981; 
+            --success-light: #d1fae5;
+            --danger: #ef4444; 
+            --danger-light: #fee2e2;
+            --warning: #f59e0b;
+            --warning-light: #fef3c7;
+            
+            --bg-main: #f1f5f9; 
+            --bg-card: #ffffff;
+            --bg-glass: rgba(255, 255, 255, 0.85);
+            
+            --text-main: #0f172a; 
+            --text-muted: #64748b; 
+            --border: #e2e8f0;
+            
             --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1);
             --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
             --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
             --shadow-glow: 0 0 15px rgba(79, 70, 229, 0.3);
-            --radius-md: 0.75rem; --radius-lg: 1.25rem; --radius-full: 9999px;
+            
+            --radius-md: 0.75rem; 
+            --radius-lg: 1.25rem;
+            --radius-full: 9999px;
             --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         body.dark {
-            --primary: #818cf8; --primary-hover: #6366f1; --primary-light: #3730a3;
-            --bg-main: #0f172a; --bg-card: #1e293b; --bg-glass: rgba(30, 41, 59, 0.85);
-            --text-main: #f8fafc; --text-muted: #94a3b8; --border: #334155;
+            --primary: #818cf8; 
+            --primary-hover: #6366f1;
+            --primary-light: #3730a3;
+            --bg-main: #0f172a; 
+            --bg-card: #1e293b;
+            --bg-glass: rgba(30, 41, 59, 0.85);
+            --text-main: #f8fafc; 
+            --text-muted: #94a3b8; 
+            --border: #334155;
             --shadow-glow: 0 0 15px rgba(129, 140, 248, 0.2);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
         
         body { 
-            font-family: 'Plus Jakarta Sans', sans-serif; background-color: var(--bg-main); 
-            color: var(--text-main); line-height: 1.6; transition: var(--transition);
+            font-family: 'Plus Jakarta Sans', sans-serif; 
+            background-color: var(--bg-main); 
+            color: var(--text-main); 
+            line-height: 1.6; 
+            transition: var(--transition);
             display: flex; justify-content: center; min-height: 100vh; overflow-x: hidden;
         }
 
+        /* Background Animasi Halus */
         #bg-layer { 
             position: fixed; inset: 0; z-index: -1; 
             background: radial-gradient(circle at 15% 50%, rgba(79, 70, 229, 0.08), transparent 25%),
@@ -65,7 +91,7 @@
         #app { width: 100%; max-width: 1200px; padding: 2rem 1.5rem; display: none; opacity: 0; transition: opacity 0.5s ease; }
         #app.loaded { display: block; opacity: 1; }
         
-        /* Header */
+        /* Header & Top Bar */
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
         .header-brand { display: flex; align-items: center; gap: 1rem; }
         .header-logo { width: 45px; height: 45px; background: var(--primary); color: white; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 800; box-shadow: var(--shadow-glow); }
@@ -85,6 +111,7 @@
         /* Tombol Global */
         .btn { background: var(--primary); color: white; border: none; padding: 0.8rem 1.5rem; border-radius: var(--radius-md); cursor: pointer; font-weight: 700; font-size: 0.95rem; transition: var(--transition); text-align: center; display: inline-flex; justify-content: center; align-items: center; gap: 0.5rem; font-family: inherit; }
         .btn:hover { background: var(--primary-hover); transform: translateY(-2px); box-shadow: var(--shadow-md); }
+        .btn:active { transform: translateY(0); }
         .btn:disabled { background: var(--secondary); cursor: not-allowed; transform: none; opacity: 0.6; box-shadow: none; }
         .btn-block { width: 100%; margin-top: 1rem; }
         .btn-danger { background: var(--danger); } .btn-danger:hover { background: #dc2626; }
@@ -92,6 +119,7 @@
         .btn-success { background: var(--success); } .btn-success:hover { background: #059669; }
         .btn-secondary { background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); } .btn-secondary:hover { background: var(--bg-main); }
         
+        /* Form Input */
         .input-field { width: 100%; padding: 0.85rem 1rem; margin-bottom: 1rem; border: 2px solid var(--border); background: var(--bg-main); color: var(--text-main); border-radius: var(--radius-md); font-size: 1rem; font-family: inherit; transition: var(--transition); font-weight: 500; }
         .input-field:focus { outline: none; border-color: var(--primary); background: var(--bg-card); box-shadow: 0 0 0 4px var(--primary-light); }
 
@@ -182,14 +210,14 @@
         .pidato-box p { font-family: 'Lora', serif; font-size: 1.1rem; line-height: 2; margin-bottom: 1.2rem; text-align: justify; text-indent: 1.5rem; }
         .word { display: inline; padding: 2px 4px; border-radius: 4px; transition: background-color 0.1s ease, color 0.1s ease; }
         
-        /* TANDA KUNING (TTS) - Diperkuat agar terlihat jelas di HP */
+        /* TANDA KUNING (TTS) - Diperkuat untuk Mobile */
         .word.tts-active { 
-            background-color: #fef08a !important; 
-            color: #000 !important; 
+            background-color: #fde047 !important; /* Kuning cerah */
+            color: #000000 !important; 
             font-weight: 800 !important; 
-            box-shadow: 0 0 10px #fef08a; 
+            box-shadow: 0 0 10px #fde047; 
             border-radius: 4px; 
-            display: inline; /* Jangan gunakan inline-block agar teks tidak melompat */
+            display: inline; /* Wajib inline agar teks tidak melompat */
         }
         
         /* TANDA HIJAU (Pengenalan Suara/Speech Recognition) */
