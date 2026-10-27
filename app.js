@@ -1044,7 +1044,7 @@ function playPidatoTTS() {
         State.media.ttsPaused = false;
         ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
         if (!window.isBoundarySupported) {
-            window.fallbackTimer = setTimeout(runFallbackHighlight, 100);
+            window.fallbackTimer = setTimeout(window.runFallbackHighlight, 50); 
         }
         return;
     }
@@ -1148,10 +1148,11 @@ function playPidatoTTS() {
         }
 
         let currentWord = pidatoWords[window.currentManualIdx];
-        let delay = 200 + (currentWord.length * 100); 
+        // Sync lebih cepat: 120ms dasar + 60ms per huruf
+        let delay = 120 + (currentWord.length * 60); 
         
-        if (currentWord.match(/[.,;:]/)) delay += 400; 
-        if (currentWord.match(/[.!?]/)) delay += 800; 
+        if (currentWord.match(/[.,;:]/)) delay += 200; 
+        if (currentWord.match(/[.!?]/)) delay += 400; 
 
         window.currentManualIdx++;
         window.fallbackTimer = setTimeout(window.runFallbackHighlight, delay);
@@ -1159,7 +1160,7 @@ function playPidatoTTS() {
 
     utterance.onstart = () => {
         if (window.fallbackTimer) clearTimeout(window.fallbackTimer);
-        window.fallbackTimer = setTimeout(window.runFallbackHighlight, 200);
+        window.fallbackTimer = setTimeout(window.runFallbackHighlight, 50);
     };
 
     utterance.onboundary = (event) => { 
