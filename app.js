@@ -1,30 +1,40 @@
-// app.js
+// ==========================================
+// app.js — FULL FIXED VERSION (v5 - Smart Type)
+// ==========================================
 
 // ==========================================
-// 1. KONFIGURASI & STATE MANAGEMENT
+// 1. STATE MANAGEMENT
 // ==========================================
 const ALL_ROUTES = ['#/dashboard', '#/kuis', '#/psikologi', '#/wawancara', '#/komputer', '#/pidato', '#/rapat'];
 
 const State = {
-    scores: JSON.parse(localStorage.getItem('dukuh_scores')) || { 
+    scores: JSON.parse(localStorage.getItem('dukuh_scores')) || {
         kuis: null, word: null, excel: null, presentasi: null, pidato: null, rapat: null,
-        wawancara: null, psikologi: null 
+        wawancara: null, psikologi: null
     },
     questions: [],
-    pidatoList: [], 
-    quiz: { active: false, index: 0, score: 0, timer: null, pointsPerQ: 0, activeQuestions: [], status: [], lastAnsweredIdx: -1 },
-    office: { active: false, wordTimer: null, excelTimer: null, wordPage: 1, excelTab: 1 },
-    ppt: { active: false, isPresenting: false, currentSlide: 0, data: [] },
+    pidatoList: [],
+    quiz: {
+        active: false, index: 0, score: 0, pointsPerQ: 0,
+        activeQuestions: [], status: [], wrongAnswers: {},
+        essayAnswers: {}, mode: 'all', endTime: 0, timer: null,
+        autoAdvanceTimer: null, countdownTimer: null
+    },
+    office: {
+        typingActive: false, typingEndTime: 0, wordTimer: null,
+        excelActive: false, excelEndTime: 0, excelTimer: null,
+        wordPage: 1, excelTab: 1
+    },
+    ppt: {
+        active: false, currentSlide: 0, data: [],
+        timer: null
+    },
     rapatDrama: { active: false, scenario: 0, step: 0, peace: 100, timer: null, typeTimer: null, nextTimer: null, history: [] },
-    wawancara: { active: false, index: 0, score: 0, activeQuestions: [], isSpeaking: false },
-    psikologi: { active: false, index: 0, score: 0, activeQuestions: [] },
-    media: { 
-        isRecording: false, 
-        recog: null, 
-        keywords: {}, 
-        ttsVoices: [], 
-        ttsPlaying: false, 
-        ttsPaused: false   
+    wawancara: { active: false, index: 0, score: 0, pointsPerQ: 20, activeQuestions: [], isSpeaking: false },
+    psikologi: { active: false, index: 0, score: 0, pointsPerQ: 0, activeQuestions: [] },
+    media: {
+        isRecording: false, recog: null, keywords: {},
+        ttsVoices: [], ttsPlaying: false, ttsPaused: false
     }
 };
 
@@ -33,7 +43,6 @@ let pidatoWords = [];
 let pidatoMatchCount = 0;
 let presRecog = null;
 
-// Variabel Global untuk Sinkronisasi TTS
 let syncInterval = null;
 let speechStartTime = 0;
 let currentHighlightIndex = -1;
@@ -42,23 +51,99 @@ let wordTimings = [];
 const saveScores = () => localStorage.setItem('dukuh_scores', JSON.stringify(State.scores));
 
 // ==========================================
-// 2. NAVIGATION
+// 2. UTILITIES
+// ==========================================
+function toast(msg, type = 'info') {
+    const el = document.createElement('div');
+    el.className = `toast toast-${type}`;
+    el.textContent = msg;
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => {
+        el.classList.remove('show');
+        setTimeout(() => el.remove(), 400);
+    }, 3800);
+}
+
+function runTimer(elementId, endTime, onEnd) {
+    const update = () => {
+        const remaining = Math.max(0, Math.floor((endTime - Date.now()) / 1000));
+        const el = document.getElementById(elementId);
+        if (el) {
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            el.innerHTML = `⏱️ Sisa Waktu: ${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+        if (remaining <= 0) {
+            clearInterval(interval);
+            const elEnd = document.getElementById(elementId);
+            if (elEnd) {
+                elEnd.innerHTML = "Waktu Habis!";
+                elEnd.style.background = 'var(--danger)';
+                elEnd.style.color = 'white';
+            }
+            try { onEnd(); } catch (e) { console.error("Timer onEnd error:", e); }
+        }
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return interval;
+}
+
+function levenshteinDistance(a, b) {
+    const m = [], rows = b.length, cols = a.length;
+    for (let i = 0; i <= rows; i++) m[i] = [i];
+    for (let j = 0; j <= cols; j++) m[0][j] = j;
+    for (let i = 1; i <= rows; i++) {
+        for (let j = 1; j <= cols; j++) {
+            m[i][j] = b.charAt(i - 1) === a.charAt(j - 1)
+                ? m[i - 1][j - 1]
+                : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
+        }
+    }
+    return m[rows][cols];
+}
+
+function wordSimilarity(a, b) {
+    if (a === b) return 1;
+    if (a.length < 3 || b.length < 3) return a === b ? 1 : 0;
+    const d = levenshteinDistance(a, b);
+    return 1 - d / Math.max(a.length, b.length);
+}
+
+function cleanWords(s) {
+    return String(s).toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 0);
+}
+
+function textMatchPercent(userText, refText) {
+    const refWords = cleanWords(refText);
+    const userWords = cleanWords(userText);
+    if (refWords.length === 0 || userWords.length === 0) return 0;
+    let matched = 0, ui = 0;
+    for (const rw of refWords) {
+        let found = false;
+        while (ui < userWords.length) {
+            if (wordSimilarity(userWords[ui], rw) >= 0.75) { matched++; ui++; found = true; break; }
+            ui++;
+        }
+        if (!found && ui >= userWords.length) break;
+    }
+    return Math.round((matched / refWords.length) * 100);
+}
+
+// ==========================================
+// 3. NAVIGATION
 // ==========================================
 function initNavigation() {
     const nav = document.getElementById('nav-menu');
     if (!nav) return;
     nav.innerHTML = '';
-    
     const routeMap = {
-        '#/dashboard': '📊 Dashboard',
-        '#/kuis': '📝 Tes Tulis',
-        '#/psikologi': '🧠 Tes Psikologi',
-        '#/wawancara': '🗣️ Wawancara',
-        '#/komputer': '💻 Praktik Komputer',
-        '#/pidato': '🎤 Pidato Jawa',
+        '#/dashboard': '📊 Dashboard', '#/kuis': '📝 Tes Tulis',
+        '#/psikologi': '🧠 Tes Psikologi', '#/wawancara': '🗣️ Wawancara',
+        '#/komputer': '💻 Praktik Komputer', '#/pidato': '🎤 Pidato Jawa',
         '#/rapat': '👥 Simulasi Rapat'
     };
-
     ALL_ROUTES.forEach(route => {
         const a = document.createElement('a');
         a.href = route;
@@ -69,16 +154,26 @@ function initNavigation() {
 }
 
 // ==========================================
-// 3. DATA FETCHING
+// 4. DATA FETCHING (SMART TYPE)
 // ==========================================
 async function loadDataFromServer() {
     try {
-        const [questionsData, pidatoData] = await Promise.all([
-            apiGetQuestions(),
-            apiGetPidato()
-        ]);
-        if(!questionsData || questionsData.length === 0) throw new Error("Data soal dari Spreadsheet kosong.");
-        State.questions = questionsData;
+        const [questionsData, pidatoData] = await Promise.all([apiGetQuestions(), apiGetPidato()]);
+        if (!questionsData || questionsData.length === 0) throw new Error("Data soal dari Spreadsheet kosong.");
+        
+        // 🔥 SISTEM PINTAR: Normalisasi Tipe Soal
+        State.questions = questionsData.map(q => {
+            let t = String(q.tipe || 'pg').toLowerCase().trim();
+            // Jika mengandung kata 'ura', 'essay', 'isian', jadikan uraian
+            if (t.includes('ura') || t.includes('essay') || t.includes('isian') || t.includes('jwb')) {
+                t = 'uraian';
+            } else {
+                // Apapun selain uraian, paksa jadi 'pg' (PG, Pilgan, Pilihan Ganda, dll)
+                t = 'pg'; 
+            }
+            return { ...q, tipe: t };
+        });
+        
         State.pidatoList = pidatoData || [];
     } catch (err) {
         throw new Error("Gagal memuat data: " + err.message);
@@ -90,101 +185,124 @@ async function initApp() {
     try {
         loader.classList.remove('hidden');
         await loadDataFromServer();
-        
         loader.style.opacity = '0';
         setTimeout(() => loader.classList.add('hidden'), 500);
-        
         const appEl = document.getElementById('app');
         appEl.classList.remove('hidden');
         setTimeout(() => appEl.classList.add('loaded'), 50);
         initNavigation();
-        if(!window.location.hash) window.location.hash = '#/dashboard';
+        if (!window.location.hash) window.location.hash = '#/dashboard';
         router();
-        
-        if('speechSynthesis' in window) populateVoices();
-        
+        if ('speechSynthesis' in window) populateVoices();
     } catch (err) {
         loader.innerHTML = `
             <div style="text-align: center; padding: 2rem;">
                 <h2 style="color: var(--danger); margin-bottom: 1rem;">⚠️ Koneksi Gagal</h2>
                 <p style="color: var(--text-main); margin-bottom: 1.5rem;">${err.message}</p>
                 <button class="btn btn-warning" onclick="location.reload()">🔄 Coba Lagi</button>
-            </div>
-        `;
+            </div>`;
     }
 }
 
 async function refreshData() {
-    if(State.quiz.active || State.office.active || State.rapatDrama.active || State.wawancara.active || State.psikologi.active) {
-        if(!confirm("Sesi ujian sedang berjalan. Memperbarui data akan menghentikan sesi. Lanjutkan?")) return;
-        location.reload(); 
+    const isBusy = State.quiz.active || State.office.typingActive || State.office.excelActive
+        || State.rapatDrama.active || State.wawancara.active || State.psikologi.active || State.ppt.active;
+    if (isBusy) {
+        if (!confirm("Sesi ujian sedang berjalan. Memperbarui data akan menghentikan sesi. Lanjutkan?")) return;
+        location.reload();
+        return;
     }
-
     const btn = document.getElementById('btn-refresh');
     const originalText = btn.innerHTML;
     btn.innerHTML = '⏳ Memuat...'; btn.disabled = true;
-
     try {
         await loadDataFromServer();
         router();
-        alert("✅ Data berhasil diperbarui!");
+        toast("Data berhasil diperbarui!", "success");
     } catch (err) {
-        alert(`❌ Gagal: ${err.message}`);
+        toast(`Gagal: ${err.message}`, "error");
     } finally {
         btn.innerHTML = originalText; btn.disabled = false;
     }
 }
 
 // ==========================================
-// 4. ROUTER SPA
+// 5. ROUTER
 // ==========================================
 const routes = {
-    '#/dashboard': renderDashboard,
-    '#/kuis': renderKuis,
-    '#/komputer': renderKomputer,
-    '#/pidato': renderPidato,
-    '#/rapat': renderRapat,
-    '#/wawancara': renderWawancara,
-    '#/psikologi': renderPsikologi
+    '#/dashboard': renderDashboard, '#/kuis': renderKuis, '#/komputer': renderKomputer,
+    '#/pidato': renderPidato, '#/rapat': renderRapat,
+    '#/wawancara': renderWawancara, '#/psikologi': renderPsikologi
 };
 
-function router() {
-    if(State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
-    if(State.office.wordTimer) { clearInterval(State.office.wordTimer); State.office.wordTimer = null; }
-    if(State.office.excelTimer) { clearInterval(State.office.excelTimer); State.office.excelTimer = null; }
-    if(State.rapatDrama.timer) { clearInterval(State.rapatDrama.timer); State.rapatDrama.timer = null; }
-    if(State.rapatDrama.typeTimer) { clearTimeout(State.rapatDrama.typeTimer); State.rapatDrama.typeTimer = null; }
-    if(State.rapatDrama.nextTimer) { clearTimeout(State.rapatDrama.nextTimer); State.rapatDrama.nextTimer = null; }
-    
-    if(window.speechSynthesis) { window.speechSynthesis.cancel(); }
+function clearOnNavigate() {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
     State.media.ttsPlaying = false;
     State.media.ttsPaused = false;
     if (syncInterval) { cancelAnimationFrame(syncInterval); syncInterval = null; }
-    
-    if(pidatoRecog && State.media.isRecording) { try { pidatoRecog.stop(); } catch(e){} State.media.isRecording = false; }
-    if(presRecog && State.media.isRecording) { try { presRecog.stop(); } catch(e){} State.media.isRecording = false; }
+    currentHighlightIndex = -1;
+    wordTimings = [];
+
+    if (pidatoRecog && State.media.isRecording) { try { pidatoRecog.stop(); } catch (e) {} State.media.isRecording = false; }
+    if (presRecog && State.media.isRecording) { try { presRecog.stop(); } catch (e) {} State.media.isRecording = false; }
+
+    if (State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
+    if (State.office.wordTimer) { clearInterval(State.office.wordTimer); State.office.wordTimer = null; }
+    if (State.office.excelTimer) { clearInterval(State.office.excelTimer); State.office.excelTimer = null; }
+    if (State.ppt.timer) { clearInterval(State.ppt.timer); State.ppt.timer = null; }
+    cancelAutoAdvance();
+
+    if (State.rapatDrama.timer) { clearInterval(State.rapatDrama.timer); State.rapatDrama.timer = null; }
+    if (State.rapatDrama.typeTimer) { clearTimeout(State.rapatDrama.typeTimer); State.rapatDrama.typeTimer = null; }
+    if (State.rapatDrama.nextTimer) { clearTimeout(State.rapatDrama.nextTimer); State.rapatDrama.nextTimer = null; }
+}
+
+function router() {
+    clearOnNavigate();
 
     let hash = window.location.hash || '#/dashboard';
     const renderFn = routes[hash] || routes['#/dashboard'];
-    
+
     document.querySelectorAll('.nav-link').forEach(link => {
         link.classList.toggle('active', link.getAttribute('href') === hash);
     });
 
     const container = document.getElementById('view-container');
-    if(container) container.innerHTML = renderFn();
-    
+    if (container) container.innerHTML = renderFn();
+
     if (hash === '#/dashboard') updateDashboardView();
     if (hash === '#/komputer') initKomputerMenu();
     if (hash === '#/pidato') { loadPidatoText(); populateVoices(); }
-    if (hash === '#/rapat' && State.rapatDrama.active) { renderDramaStep(); }
-    if (hash === '#/wawancara' && State.wawancara.active) { showWawancaraQuestion(); }
-    if (hash === '#/psikologi' && State.psikologi.active) { showPsikologiQuestion(); }
+    if (hash === '#/rapat' && State.rapatDrama.active) renderDramaStep();
+    if (hash === '#/wawancara' && State.wawancara.active) showWawancaraQuestion();
+    if (hash === '#/psikologi' && State.psikologi.active) showPsikologiQuestion();
+
+    if (hash === '#/kuis' && State.quiz.active) {
+        if (State.quiz.endTime - Date.now() <= 0) { finishQuiz(); return; }
+        State.quiz.timer = runTimer('kuis-timer', State.quiz.endTime, () => finishQuiz());
+        showQuizQuestion();
+    }
+
+    if (hash === '#/komputer' && State.office.typingActive) {
+        if (State.office.typingEndTime - Date.now() <= 0) { finishTypingTest(); return; }
+        document.getElementById('office-intro')?.classList.add('hidden');
+        document.getElementById('office-typing')?.classList.remove('hidden');
+        State.office.wordTimer = runTimer('office-timer', State.office.typingEndTime, () => finishTypingTest());
+        switchWordPage(State.office.wordPage);
+    }
+
+    if (hash === '#/komputer' && State.office.excelActive) {
+        if (State.office.excelEndTime - Date.now() <= 0) { finishExcelTest(); return; }
+        document.getElementById('excel-intro')?.classList.add('hidden');
+        document.getElementById('excel-test')?.classList.remove('hidden');
+        State.office.excelTimer = runTimer('excel-timer', State.office.excelEndTime, () => finishExcelTest());
+        switchExcelTab(State.office.excelTab);
+    }
 }
 window.addEventListener('hashchange', router);
 
 // ==========================================
-// 5. VIEWS
+// 6. DASHBOARD VIEW
 // ==========================================
 function renderDashboard() {
     return `
@@ -192,15 +310,12 @@ function renderDashboard() {
             <h2 style="font-weight: 800; font-size: 2rem; margin-bottom: 0.5rem; color: var(--text-main);">Laporan Hasil Seleksi</h2>
             <p style="color: var(--text-muted); font-size: 1.1rem;">Selesaikan seluruh modul untuk melihat hasil akhir kelulusan.</p>
         </div>
-        
         <div class="grid" id="dash-cards"></div>
-        
         <div class="final-box">
             <h3>Nilai Akhir Komprehensif</h3>
             <div class="final-score" id="dash-final">-</div>
             <p id="dash-status" style="font-weight: 700; font-size: 1.1rem; letter-spacing: 1px;">MENUNGGU PENYELESAIAN MODUL</p>
         </div>
-        
         <div style="max-width: 500px; margin: 0 auto; background: var(--bg-card); padding: 1.5rem; border-radius: var(--radius-lg); border: 2px solid var(--border);">
             <h4 style="margin-bottom: 1rem; color: var(--text-main); text-align: center;">Kirim Hasil Ujian</h4>
             <input type="text" id="p-name" class="input-field" placeholder="Ketik Nama Lengkap Sesuai KTP..." required>
@@ -209,40 +324,85 @@ function renderDashboard() {
                 <button class="btn btn-success" style="flex:1;" onclick="window.print()">🖨️ Cetak PDF</button>
                 <button class="btn btn-danger" style="flex:1;" onclick="if(confirm('Hapus semua nilai dan mulai ulang?')){localStorage.clear();location.reload();}">🗑️ Reset</button>
             </div>
-        </div>
-    `;
+        </div>`;
 }
 
+function updateDashboardView() {
+    const allMods = [
+        { k: 'kuis', n: 'Kuis', icon: '📝' },
+        { k: 'psikologi', n: 'Psikologi', icon: '🧠' },
+        { k: 'wawancara', n: 'Wawancara', icon: '🗣️' },
+        { k: 'word', n: 'Ketik Word', icon: '⌨️' },
+        { k: 'excel', n: 'Tabel Excel', icon: '📊' },
+        { k: 'presentasi', n: 'Presentasi PPT', icon: '📽️' },
+        { k: 'pidato', n: 'Pidato Jawa', icon: '🎤' },
+        { k: 'rapat', n: 'Simulasi Rapat', icon: '👥' }
+    ];
+    let html = '', selesai = 0;
+    allMods.forEach(m => {
+        const val = State.scores[m.k];
+        const isSet = val !== null && val !== undefined;
+        if (isSet) selesai++;
+        const stat = !isSet ? 'Belum' : (val >= 70 ? 'Lulus' : 'Remedial');
+        const color = !isSet ? 'var(--secondary)' : (val >= 70 ? 'var(--success)' : 'var(--danger)');
+        const bg = !isSet ? 'var(--bg-main)' : (val >= 70 ? 'var(--success-light)' : 'var(--danger-light)');
+        html += `<div class="card"><h4>${m.icon} ${m.n}</h4><div class="card-val">${isSet ? val : '-'}</div><small style="color:${color}; background: ${bg};">${stat}</small></div>`;
+    });
+    const cardsEl = document.getElementById('dash-cards');
+    if (cardsEl) cardsEl.innerHTML = html;
+
+    const required = ['kuis', 'word', 'excel', 'presentasi', 'pidato', 'rapat', 'wawancara', 'psikologi'];
+    const complete = required.every(k => State.scores[k] !== null && State.scores[k] !== undefined);
+    const finalEl = document.getElementById('dash-final');
+    const statusEl = document.getElementById('dash-status');
+    if (!finalEl || !statusEl) return;
+
+    if (complete) {
+        const rataKomp = (State.scores.word + State.scores.excel + State.scores.presentasi) / 3;
+        const rataSos = (State.scores.pidato + State.scores.rapat) / 2;
+        const total = (State.scores.kuis * 0.3) + (State.scores.wawancara * 0.1) + (State.scores.psikologi * 0.2) + (rataKomp * 0.2) + (rataSos * 0.2);
+        const rounded = Math.round(total);
+        finalEl.innerText = rounded;
+        if (rounded >= 70) { statusEl.innerText = "STATUS: LULUS"; statusEl.style.color = "#a7f3d0"; }
+        else { statusEl.innerText = "STATUS: BELUM LULUS"; statusEl.style.color = "#fca5a5"; }
+    } else {
+        finalEl.innerText = "-";
+        statusEl.innerText = `MENUNGGU PENYELESAIAN (${selesai}/8 Modul Selesai)`;
+        statusEl.style.color = "white";
+    }
+}
+
+// ==========================================
+// 7. QUIZ VIEW + CONTROLLER
+// ==========================================
 function renderKuis() {
     if (!State.quiz.active) {
-        const filteredQuestions = State.questions;
-        if (filteredQuestions.length === 0) return `<div class="text-center" style="padding: 3rem 0;"><h3 style="color: var(--warning);">Tidak ada soal di BankSoal.</h3></div>`;
-        const totalPg = filteredQuestions.filter(q => q.tipe === 'pg').length;
-        const totalUraian = filteredQuestions.filter(q => q.tipe === 'uraian').length;
-        
+        const filtered = State.questions;
+        if (filtered.length === 0) return `<div class="text-center" style="padding: 3rem 0;"><h3 style="color: var(--warning);">Tidak ada soal di BankSoal.</h3></div>`;
+        const totalPg = filtered.filter(q => q.tipe === 'pg').length;
+        const totalUraian = filtered.filter(q => q.tipe === 'uraian').length;
+        const hasScore = State.scores.kuis !== null && State.scores.kuis !== undefined;
+        const warn = hasScore ? `<div style="background: var(--warning-light); color: #92400e; padding: 1rem; border-radius: var(--radius-md); border: 1px solid var(--warning); margin-bottom: 1.5rem; font-size: 0.9rem; max-width: 500px; margin-left: auto; margin-right: auto;">⚠️ Anda sudah menyelesaikan kuis dengan skor <b>${State.scores.kuis}</b>. Mengulang akan <b>menimpa</b> skor tersebut.</div>` : '';
         return `
             <div class="text-center" style="padding: 2rem 0;">
                 <div style="font-size: 4rem; margin-bottom: 1rem;">📝</div>
                 <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Ujian Tertulis</h2>
-                <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Ujian ini menguji pengetahuan Anda tentang Pancasila, Pemerintahan Kalurahan, Keistimewaan DIY, dan Isu Terkini. Pilih metode pengerjaan di bawah ini.
+                <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2rem; max-width: 600px; margin-left: auto; margin-right: auto;">
+                    Ujian ini menguji pengetahuan Anda tentang Pancasila, Pemerintahan Kalurahan, Keistimewaan DIY, dan Isu Terkini.
                 </p>
-                
+                ${warn}
                 <div style="display: grid; gap: 1rem; max-width: 500px; margin: 0 auto;">
                     <button class="btn btn-block" style="padding: 1.25rem; font-size: 1.1rem; justify-content: space-between;" onclick="startQuiz('all')">
-                        <span>📚 Semua Soal</span> <span style="background: rgba(255,255,255,0.2); padding: 0.2rem 0.8rem; border-radius: 20px;">${filteredQuestions.length} Soal</span>
+                        <span>📚 Semua Soal</span> <span style="background: rgba(255,255,255,0.2); padding: 0.2rem 0.8rem; border-radius: 20px;">${filtered.length} Soal</span>
                     </button>
-                    ${totalPg > 0 ? `
-                    <button class="btn btn-success btn-block" style="padding: 1.25rem; font-size: 1.1rem; justify-content: space-between;" onclick="startQuiz('pg')">
+                    ${totalPg > 0 ? `<button class="btn btn-success btn-block" style="padding: 1.25rem; font-size: 1.1rem; justify-content: space-between;" onclick="startQuiz('pg')">
                         <span>🔤 Pilihan Ganda</span> <span style="background: rgba(255,255,255,0.2); padding: 0.2rem 0.8rem; border-radius: 20px;">${totalPg} Soal</span>
                     </button>` : ''}
-                    ${totalUraian > 0 ? `
-                    <button class="btn btn-warning btn-block" style="padding: 1.25rem; font-size: 1.1rem; justify-content: space-between;" onclick="startQuiz('uraian')">
+                    ${totalUraian > 0 ? `<button class="btn btn-warning btn-block" style="padding: 1.25rem; font-size: 1.1rem; justify-content: space-between;" onclick="startQuiz('uraian')">
                         <span>✍️ Soal Uraian</span> <span style="background: rgba(255,255,255,0.2); padding: 0.2rem 0.8rem; border-radius: 20px;">${totalUraian} Soal</span>
                     </button>` : ''}
                 </div>
-            </div>
-        `;
+            </div>`;
     }
     return `
         <div class="timer-badge" id="kuis-timer">⏱️ Sisa Waktu: --:--</div>
@@ -250,18 +410,298 @@ function renderKuis() {
             <span>Soal <span id="q-idx" style="color: var(--primary); font-size: 1.2rem;">1</span>/${State.quiz.activeQuestions.length}</span>
             <span>Skor Sementara: <span id="q-score" style="color: var(--success); font-size: 1.2rem;">0</span></span>
         </div>
-        
-        <!-- NAVIGASI KOTAK SOAL -->
         <div class="q-nav-container" id="q-navigator"></div>
-
         <div class="progress-bar"><div class="progress-fill" id="q-progress"></div></div>
-        
         <div id="q-text" style="font-size: 1.4rem; font-weight: 700; margin-bottom: 2rem; line-height: 1.5; color: var(--text-main);"></div>
         <div id="q-options"></div>
         <div class="explanation" id="q-exp"></div>
-        <button class="btn btn-block" id="q-next" style="margin-top: 2rem; padding: 1rem; font-size: 1.1rem;" onclick="nextQuizQuestion()" disabled>Lanjut Soal Berikutnya ➔</button>
-    `;
+        <button class="btn btn-block" id="q-next" style="margin-top: 2rem; padding: 1rem; font-size: 1.1rem;" onclick="nextQuizQuestion()" disabled>Lanjut Soal Berikutnya ➔</button>`;
 }
+
+function resolveCorrectIndex(q) {
+    const raw = q.answer;
+    if (typeof raw === 'number' && raw >= 0 && raw <= 3) return raw;
+    const str = String(raw || '').trim();
+    if (/^[0-3]$/.test(str)) return parseInt(str);
+    if (/^[A-D][\.\s]*$/i.test(str)) return ['A','B','C','D'].indexOf(str.charAt(0).toUpperCase());
+    const clean = s => String(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cleanKey = clean(str);
+    let idx = q.options.findIndex(o => clean(o) === cleanKey);
+    if (idx === -1) idx = q.options.findIndex(o => clean(o).includes(cleanKey) || cleanKey.includes(clean(o)));
+    return idx;
+}
+
+function cancelAutoAdvance() {
+    if (State.quiz.autoAdvanceTimer) { clearTimeout(State.quiz.autoAdvanceTimer); State.quiz.autoAdvanceTimer = null; }
+    if (State.quiz.countdownTimer) { clearInterval(State.quiz.countdownTimer); State.quiz.countdownTimer = null; }
+}
+
+function startAutoAdvance(seconds) {
+    cancelAutoAdvance();
+    const answeredIndex = State.quiz.index;
+    const nextBtn = document.getElementById('q-next');
+    if (!nextBtn) return;
+
+    let remaining = seconds;
+    const renderBtnText = () => {
+        nextBtn.innerText = `⏳ Lanjut otomatis dalam ${remaining}s — klik untuk langsung`;
+    };
+    renderBtnText();
+    nextBtn.disabled = false;
+
+    State.quiz.countdownTimer = setInterval(() => {
+        remaining--;
+        if (remaining > 0) renderBtnText();
+    }, 1000);
+
+    State.quiz.autoAdvanceTimer = setTimeout(() => {
+        cancelAutoAdvance();
+        if (State.quiz.active && State.quiz.index === answeredIndex) {
+            autoAdvanceFrom(answeredIndex);
+        }
+    }, seconds * 1000);
+}
+
+function autoAdvanceFrom(currentIdx) {
+    if (!State.quiz.active) return;
+    for (let i = currentIdx + 1; i < State.quiz.activeQuestions.length; i++) {
+        if (State.quiz.status[i] === 'unanswered') {
+            State.quiz.index = i;
+            showQuizQuestion();
+            return;
+        }
+    }
+    const skipped = State.quiz.status.findIndex(s => s === 'unanswered');
+    if (skipped !== -1) {
+        State.quiz.index = skipped;
+        showQuizQuestion();
+        return;
+    }
+    finishQuiz();
+}
+
+function startQuiz(mode) {
+    let filtered = State.questions;
+    if (mode === 'pg') filtered = filtered.filter(q => q.tipe === 'pg');
+    if (mode === 'uraian') filtered = filtered.filter(q => q.tipe === 'uraian');
+    if (filtered.length === 0) return toast("Tidak ada soal untuk kategori ini.", "warning");
+
+    if (State.scores.kuis !== null && State.scores.kuis !== undefined) {
+        if (!confirm(`Skor kuis Anda (${State.scores.kuis}) akan ditimpa jika Anda menyelesaikan ulang. Lanjutkan?`)) return;
+    }
+
+    cancelAutoAdvance();
+    if (State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
+
+    State.quiz = {
+        active: true, index: 0, score: 0, pointsPerQ: 100 / filtered.length,
+        activeQuestions: filtered, status: new Array(filtered.length).fill('unanswered'),
+        wrongAnswers: {}, essayAnswers: {}, mode, endTime: 0, timer: null,
+        autoAdvanceTimer: null, countdownTimer: null
+    };
+    
+    const timeLimit = Math.max(7200, filtered.length * 60);
+    State.quiz.endTime = Date.now() + timeLimit * 1000;
+
+    router();
+    State.quiz.timer = runTimer('kuis-timer', State.quiz.endTime, () => finishQuiz());
+    showQuizQuestion();
+}
+
+function renderNavigator() {
+    const nav = document.getElementById('q-navigator');
+    if (!nav) return;
+    nav.innerHTML = '';
+    State.quiz.activeQuestions.forEach((q, i) => {
+        const box = document.createElement('div');
+        box.className = 'q-nav-box';
+        if (i === State.quiz.index) box.classList.add('active');
+        const st = State.quiz.status[i];
+        if (st === 'correct') box.classList.add('correct');
+        else if (st === 'wrong') box.classList.add('wrong');
+        else if (st === 'answered') box.classList.add('answered');
+        box.innerText = i + 1;
+        box.onclick = () => jumpToQuestion(i);
+        nav.appendChild(box);
+    });
+}
+
+function jumpToQuestion(i) {
+    cancelAutoAdvance();
+    State.quiz.index = i;
+    showQuizQuestion();
+}
+
+function showQuizQuestion() {
+    const q = State.quiz.activeQuestions[State.quiz.index];
+    document.getElementById('q-idx').innerText = State.quiz.index + 1;
+    document.getElementById('q-text').innerText = q.question;
+    const currentStatus = State.quiz.status[State.quiz.index];
+    const isLast = State.quiz.index === State.quiz.activeQuestions.length - 1;
+
+    if (q.tipe === 'uraian') {
+        document.getElementById('q-options').innerHTML = `<textarea id="q-essay-input" class="input-field" style="height: 180px; font-family: inherit; font-size: 1.1rem; resize: vertical; line-height: 1.6;" placeholder="Ketik jawaban uraian Anda di sini (minimal 30 karakter)..."></textarea>`;
+        const ta = document.getElementById('q-essay-input');
+        ta.value = State.quiz.essayAnswers[State.quiz.index] || '';
+        ta.addEventListener('input', (e) => { State.quiz.essayAnswers[State.quiz.index] = e.target.value; });
+        if (currentStatus !== 'unanswered') ta.disabled = true;
+        document.getElementById('q-exp').style.display = 'none';
+        document.getElementById('q-next').disabled = false;
+        document.getElementById('q-next').innerText = isLast ? "Selesai & Simpan" : "Lanjut Soal Berikutnya ➔";
+    } else {
+        const correctIdx = resolveCorrectIndex(q);
+        const wrongIdx = State.quiz.wrongAnswers[State.quiz.index];
+        const optsHtml = q.options.map((opt, i) => {
+            let cls = 'option';
+            if (currentStatus !== 'unanswered') {
+                if (i === correctIdx) cls += ' correct';
+                else if (currentStatus === 'wrong' && i === wrongIdx) cls += ' wrong';
+            }
+            return `<div class="${cls}" onclick="answerQuiz(${i}, this)" style="${currentStatus !== 'unanswered' ? 'pointer-events:none;' : ''}">
+                <div class="option-letter">${String.fromCharCode(65 + i)}</div>
+                <div>${opt}</div>
+            </div>`;
+        }).join('');
+        document.getElementById('q-options').innerHTML = optsHtml;
+
+        if (currentStatus !== 'unanswered') {
+            document.getElementById('q-exp').innerHTML = `<b>💡 Pembahasan:</b> ${q.explanation || 'Tidak ada pembahasan.'}`;
+            document.getElementById('q-exp').style.display = 'block';
+            document.getElementById('q-next').disabled = false;
+        } else {
+            document.getElementById('q-exp').style.display = 'none';
+            document.getElementById('q-next').disabled = true;
+        }
+        document.getElementById('q-next').innerText = isLast ? "Selesai & Simpan" : "Lanjut Soal Berikutnya ➔";
+    }
+    document.getElementById('q-progress').style.width = `${((State.quiz.index + 1) / State.quiz.activeQuestions.length) * 100}%`;
+    renderNavigator();
+}
+
+function answerQuiz(idx, el) {
+    const q = State.quiz.activeQuestions[State.quiz.index];
+    const opts = document.getElementById('q-options').children;
+    for (let o of opts) o.style.pointerEvents = 'none';
+    const correctIdx = resolveCorrectIndex(q);
+    const isCorrect = idx === correctIdx;
+    if (isCorrect) {
+        el.classList.add('correct');
+        State.quiz.score += State.quiz.pointsPerQ;
+        State.quiz.status[State.quiz.index] = 'correct';
+    } else {
+        el.classList.add('wrong');
+        if (correctIdx >= 0 && correctIdx < opts.length) opts[correctIdx].classList.add('correct');
+        State.quiz.status[State.quiz.index] = 'wrong';
+        State.quiz.wrongAnswers[State.quiz.index] = idx;
+    }
+    document.getElementById('q-score').innerText = Math.round(State.quiz.score);
+    document.getElementById('q-exp').innerHTML = `<b>💡 Pembahasan:</b> ${q.explanation || 'Tidak ada pembahasan.'}`;
+    document.getElementById('q-exp').style.display = 'block';
+    renderNavigator();
+    startAutoAdvance(2);
+}
+
+function evaluateEssay(userAnswer, correctAnswerText) {
+    if (!correctAnswerText || typeof correctAnswerText !== 'string') return true;
+    const clean = s => s.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
+    const cleanUser = clean(userAnswer);
+    const cleanRef = clean(correctAnswerText);
+    const refKeywords = cleanRef.split(/\s+/).filter(w => w.length > 3);
+    if (refKeywords.length === 0) return true;
+    let match = 0;
+    refKeywords.forEach(k => { if (cleanUser.includes(k)) match++; });
+    return ((match / refKeywords.length) * 100) >= 40;
+}
+
+function nextQuizQuestion() {
+    cancelAutoAdvance();
+    const q = State.quiz.activeQuestions[State.quiz.index];
+
+    if (q.tipe === 'uraian' && State.quiz.status[State.quiz.index] === 'unanswered') {
+        const ta = document.getElementById('q-essay-input');
+        const userText = ((ta && ta.value) || State.quiz.essayAnswers[State.quiz.index] || '').trim();
+        if (userText.length < 30) return toast("Jawaban terlalu pendek. Minimal 30 karakter.", "warning");
+        if (evaluateEssay(userText, q.answer)) {
+            State.quiz.score += State.quiz.pointsPerQ;
+            document.getElementById('q-score').innerText = Math.round(State.quiz.score);
+            toast("Jawaban sesuai kunci. Poin ditambahkan.", "success");
+        } else {
+            toast("Jawaban kurang lengkap/kurang tepat.", "warning");
+        }
+        State.quiz.status[State.quiz.index] = 'answered';
+        renderNavigator();
+    }
+
+    autoAdvanceFrom(State.quiz.index);
+}
+
+function finishQuiz() {
+    if (!State.quiz.active) return;
+    cancelAutoAdvance();
+    if (State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
+    State.scores.kuis = Math.round(State.quiz.score);
+    saveScores();
+    State.quiz.active = false;
+    window.location.hash = '#/dashboard';
+    toast(`Ujian Selesai! Skor Anda: ${State.scores.kuis}`, "success");
+}
+
+// ==========================================
+// 8. PSIKOLOGI
+// ==========================================
+const PsikoData = [
+    { q: "Semua Dukuh adalah pemimpin. Sebagian pemimpin adalah pendengar yang baik. Maka...", opts: ["Semua Dukuh pendengar yang baik.", "Sebagian Dukuh adalah pendengar yang baik.", "Tidak ada Dukuh yang pendengar baik.", "Semua pendengar baik adalah Dukuh."], ans: 1 },
+    { q: "Jika hujan turun, jalan menjadi basah. Jalan tidak basah. Kesimpulannya...", opts: ["Hujan turun.", "Hujan tidak turun.", "Jalan tetap kering.", "Tidak bisa disimpulkan."], ans: 1 },
+    { q: "Analogi: Dokter : Rumah Sakit = Petani : ...", opts: ["Cangkul", "Sawah", "Padi", "Traktor"], ans: 1 },
+    { q: "Analogi: Kepala Dukuh : Padukuhan = Lurah : ...", opts: ["Kecamatan", "Kalurahan", "Kabupaten", "Provinsi"], ans: 1 },
+    { q: "Semua A adalah B. Semua B adalah C. Maka...", opts: ["Semua C adalah A.", "Semua A adalah C.", "Sebagian C adalah A.", "Tidak ada kesimpulan."], ans: 1 },
+    { q: "Andi lebih tua dari Budi. Budi lebih tua dari Cici. Siapa yang paling muda?", opts: ["Andi", "Budi", "Cici", "Tidak tahu"], ans: 2 },
+    { q: "Jika 3 ekor sapi memakan rumput 3 lapangan dalam 3 hari. Berapa lapangan yang dimakan 6 sapi dalam 6 hari?", opts: ["6 lapangan", "9 lapangan", "12 lapangan", "18 lapangan"], ans: 2 },
+    { q: "Buku A lebih tebal dari Buku B. Buku C lebih tipis dari Buku A. Buku B lebih tebal dari Buku C. Siapa yang paling tebal?", opts: ["Buku A", "Buku B", "Buku C", "Buku D"], ans: 0 },
+    { q: "Analogi: Uang : Dompet = Air : ...", opts: ["Gelas", "Minum", "Haus", "Hujan"], ans: 0 },
+    { q: "Anda melihat 5 burung di pohon. Anda menembak 1. Berapa sisa burung di pohon?", opts: ["4", "1", "0", "5"], ans: 2 },
+    { q: "Sebuah jam dinding berdentang 6 kali dalam 5 detik. Berapa waktu yang dibutuhkan untuk berdentang 12 kali?", opts: ["10 detik", "11 detik", "12 detik", "15 detik"], ans: 1 },
+    { q: "Analogi: Rumah : Atap = Tubuh : ...", opts: ["Kaki", "Tangan", "Kepala", "Rambut"], ans: 2 },
+    { q: "Jika Anda berjalan 10 meter ke utara, lalu 10 meter ke selatan. Di mana posisi Anda?", opts: ["10 meter dari awal", "Di tempat awal", "20 meter dari awal", "Tidak tahu"], ans: 1 },
+    { q: "Semua bunga mawar berwarna merah. Sebagian bunga di taman adalah mawar. Maka...", opts: ["Semua bunga di taman merah.", "Sebagian bunga di taman merah.", "Tidak ada bunga merah.", "Semua merah adalah mawar."], ans: 1 },
+    { q: "Mana yang tidak sekelompok?", opts: ["Apel", "Jeruk", "Mangga", "Wortel"], ans: 3 },
+    { q: "Mana yang tidak sekelompok?", opts: ["Dukuh", "Lurah", "Bupati", "Guru"], ans: 3 },
+    { q: "Kebalikan dari 'Abadi' adalah...", opts: ["Kekal", "Fana", "Lestari", "Awet"], ans: 1 },
+    { q: "Kebalikan dari 'Sederhana' adalah...", opts: ["Mewah", "Kaya", "Boros", "Hemat"], ans: 0 },
+    { q: "Analogi: Buku : Halaman = Tangga : ...", opts: ["Kayu", "Anak Tangga", "Rumah", "Bangunan"], ans: 1 },
+    { q: "Jika P > Q dan Q > R, maka...", opts: ["P < R", "P > R", "P = R", "R > P"], ans: 1 },
+    { q: "Anda mendapati dua warga bersitegang masalah batas tanah. Warga A membawa parang. Apa tindakan pertama Anda?", opts: ["Membiarkan mereka.", "Mendekati Warga A dengan tenang, meminta parangnya diturunkan, lalu memisahkan mereka.", "Memarahi keduanya."], ans: 1 },
+    { q: "Ada tawaran proyek dari pihak swasta. Mereka menawarkan 'uang pelicin'. Sebagai Dukuh, Anda...", opts: ["Menerima uang untuk kas padukuhan.", "Menolak tegas dan menjelaskan bahwa semua harus sesuai prosedur.", "Menerima uangnya diam-diam."], ans: 1 },
+    { q: "Anda memiliki 3 agenda mendesak: 1) Rapat di Kapanewon, 2) Warga sakit, 3) Tamu Dinas. Prioritas Anda?", opts: ["Mendelegasikan urusan warga, pergi ke rapat.", "Membatalkan semua agenda dan menangani warga sakit.", "Menugaskan staf mengurus warga sakit, lalu minta izin telat rapat."], ans: 1 },
+    { q: "Proyek jembatan gagal karena kontraktor kabur. Warga sangat marah. Anda...", opts: ["Menyalahkan kontraktor.", "Meminta maaf, menjelaskan kronologinya, dan berjanji mencari solusi.", "Menghindari warga."], ans: 1 },
+    { q: "Warga kaya meminta izin memotong jalan lingkungan demi memperluas rumah. Warga lain resah. Anda...", opts: ["Mengizinkan karena dia menyumbang.", "Menolak tegas karena jalan umum tidak boleh diprivatisasi.", "Mengizinkan tapi minta uang kompensasi."], ans: 1 },
+    { q: "Pemuda di padukuhan sering mabuk-mabukan. Anda...", opts: ["Melaporkan ke polisi.", "Mendekati secara personal dan menawarkan wadah Karang Taruna.", "Membiarkan saja."], ans: 1 },
+    { q: "Warga RT 01 dan RT 02 berselisih soal jadwal ronda. Anda...", opts: ["Memarahi RT 02.", "Mempertemukan kedua ketua RT dan menyusun ulang jadwal adil.", "Membiarkan saja."], ans: 1 },
+    { q: "Ada laporan staf Anda melakukan pungli (pungutan liar).", opts: ["Langsung memecat staf.", "Memanggil staf, klarifikasi internal, dan mencari bukti.", "Mengabaikan laporan."], ans: 1 },
+    { q: "Musim kemarau menyebabkan sumur warga kering. Dana terbatas. Anda...", opts: ["Meminta warga menampung air hujan.", "Bersama warga gotong royong mencari sumber mata air.", "Menyalahkan cuaca."], ans: 1 },
+    { q: "Tokoh masyarakat sering mengkritik kebijakan Anda di depan umum.", opts: ["Mengucilkan tokoh tersebut.", "Mengajaknya berdiskusi secara pribadi (empat mata).", "Membalas kritikannya."], ans: 1 },
+    { q: "Anda melihat warga membuang sampah ke sungai. Tindakan Anda?", opts: ["Membiarkan karena itu hak warga.", "Menegur dengan sopan dan mengingatkan tentang banjir.", "Melaporkan langsung ke polisi."], ans: 1 },
+    { q: "Warga meminta bantuan dana untuk hajatan, namun kas padukuhan kosong. Anda...", opts: ["Memberikan janji palsu.", "Menjelaskan kondisi kas secara transparan dan menawarkan bantuan tenaga.", "Memarahi warga karena meminta terus."], ans: 1 },
+    { q: "Saat rapat, ada warga yang terus memotong pembicaraan Anda. Anda...", opts: ["Membentaknya.", "Mempersilakannya bicara dulu, lalu menanggapi dengan tenang.", "Mengabaikannya."], ans: 1 },
+    { q: "Anda dihadapkan pada dua warga yang berebut bantuan sosial. Anda...", opts: ["Membaginya dua secara paksa.", "Mengecek data TKSK siapa yang lebih berhak.", "Mengembalikan uang ke pemerintah."], ans: 1 },
+    { q: "Seorang warga meminta Anda memalsukan surat keterangan miskin. Anda...", opts: ["Menuruti karena kasihan.", "Menolak tegas karena melanggar hukum.", "Meminta uang imbalan."], ans: 1 },
+    { q: "Pemuda padukuhan ingin membuat kegiatan yang berisiko (balap liar). Anda...", opts: ["Mengizinkan.", "Mengarahkan mereka ke kegiatan positif/olahraga resmi.", "Melarang tanpa penjelasan."], ans: 1 },
+    { q: "Warga lansia mengeluh kesulitan mengambil bantuan. Anda...", opts: ["Menyuruhnya mengambil sendiri.", "Mengantarkan bantuan langsung ke rumahnya.", "Meminta RT yang mengurus."], ans: 1 },
+    { q: "Ada tawaran menjadi pengurus partai politik tertentu. Sebagai Dukuh, Anda...", opts: ["Menerima untuk mencari kekuatan.", "Menolak karena Dukuh harus netral.", "Menerima diam-diam."], ans: 1 },
+    { q: "Warga Anda ada yang meninggal tapi tidak ada ahli waris. Anda...", opts: ["Membiarkan jenazah terbengkalai.", "Mengkoordinasi pemakaman secara kekeluargaan dan adat.", "Melaporkan ke media sosial."], ans: 1 },
+    { q: "Anda salah mengeluarkan kebijakan yang membuat warga rugi. Anda...", opts: ["Menyalahkan staf.", "Meminta maaf secara terbuka dan segera memperbaiki kesalahan.", "Pura-pura tidak tahu."], ans: 1 },
+    { q: "Saat Anda berbicara di forum, ada warga yang menertawakan Anda. Anda...", opts: ["Marah dan meninggalkan forum.", "Tetap tenang dan melanjutkan pembicaraan.", "Membalas dengan ejekan."], ans: 1 },
+    { q: "Bantuan sembako dari pemerintah datang terlambat. Warga marah. Anda...", opts: ["Menyalahkan pemerintah pusat.", "Menjelaskan proses pengiriman dan meredakan emosi warga.", "Bersembunyi di rumah."], ans: 1 },
+    { q: "Staf Anda bekerja lambat. Anda...", opts: ["Memarahinya di depan umum.", "Menegurnya secara pribadi dan mencari tahu kendalanya.", "Menggantikannya."], ans: 1 },
+    { q: "Warga ingin menjual tanah warisan untuk berfoya-foya. Anda...", opts: ["Membiarkan.", "Mengingatkan agar uang digunakan untuk hal produktif.", "Meminta bagian."], ans: 1 },
+    { q: "Ada warga baru yang belum melapor ke RT. Anda...", opts: ["Mengusirnya.", "Mendatangi dan meminta melengkapi administrasi dengan ramah.", "Mengabaikannya."], ans: 1 },
+    { q: "Anda diminta memimpin doa di acara lintas agama. Anda...", opts: ["Menolak.", "Memberikan kesempatan pemuka agama untuk memimpin doa.", "Memaksa doa sesuai agama Anda."], ans: 1 },
+    { q: "Anggota keluarga Anda ingin diprioritaskan dalam proyek padukuhan. Anda...", opts: ["Memprioritaskannya.", "Menolak dan tetap profesional sesuai aturan.", "Memberi jatah kecil."], ans: 1 },
+    { q: "Warga mengeluh jalan rusak. Anda belum punya dana. Anda...", opts: ["Berdiam diri.", "Mengajak gotong royong sementara dan mengusulkan dana ke Kalurahan.", "Menyalahkan cuaca."], ans: 1 },
+    { q: "Seorang warga meminta Anda menjadi juru damai masalah keluarga, tapi Anda tidak sanggup. Anda...", opts: ["Memaksakan diri.", "Merujuk ke pihak yang lebih ahli (psikolog/tokoh agama).", "Mengabaikannya."], ans: 1 },
+    { q: "Sebagai Dukuh, Anda menerima laporan bahwa ada warga yang mencuri listrik. Sikap Anda?", opts: ["Diamkan.", "Tegur, edukasi bahayanya, dan bantu proses pemasangan resmi.", "Umumkan ke seluruh warga."], ans: 1 },
+    { q: "Ada warga yang menolak vaksinasi anak karena alasan pribadi. Anda...", opts: ["Memaksa.", "Memberi edukasi bersama tenaga kesehatan.", "Membiarkan sepenuhnya."], ans: 1 }
+];
 
 function renderPsikologi() {
     if (!State.psikologi.active) {
@@ -270,27 +710,187 @@ function renderPsikologi() {
                 <div style="font-size: 4rem; margin-bottom: 1rem;">🧠</div>
                 <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Tes Psikologi (SJT)</h2>
                 <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Tes Situational Judgment (SJT) ini mengukur integritas, ketangguhan mental, dan cara Anda mengambil keputusan etis dalam situasi sulit sebagai pemimpin.
+                    Tes Situational Judgment mengukur integritas, ketangguhan mental, dan pengambilan keputusan etis.
                 </p>
                 <button class="btn btn-block" style="font-size: 1.2rem; padding: 1.25rem; max-width: 400px; margin: 0 auto;" onclick="startPsikologi()">Mulai Tes Psikologi</button>
-            </div>
-        `;
+            </div>`;
     }
     return `
         <div class="progress-bar"><div class="progress-fill" id="p-progress"></div></div>
         <div style="text-align: center; font-weight: 700; color: var(--text-muted); margin-bottom: 2rem;">
             Situasi <span id="p-idx" style="color: var(--primary);">1</span> dari ${State.psikologi.activeQuestions.length}
         </div>
-        
         <div style="background: var(--primary-light); padding: 2rem; border-radius: var(--radius-lg); border: 2px solid var(--primary); margin-bottom: 2rem; box-shadow: var(--shadow-sm);">
             <span style="color: var(--primary); font-weight: 800; font-size: 0.9rem; display: block; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 1px;">Situasi yang Anda Hadapi:</span>
             <p style="font-size: 1.3rem; font-weight: 700; line-height: 1.6; color: var(--text-main);" id="p-text-situation"></p>
         </div>
-        
-        <div id="p-options" style="display: flex; flex-direction: column; gap: 1rem;"></div>
-    `;
+        <div id="p-options" style="display: flex; flex-direction: column; gap: 1rem;"></div>`;
 }
 
+function startPsikologi() {
+    State.psikologi = {
+        active: true, index: 0, score: 0,
+        pointsPerQ: 100 / PsikoData.length,
+        activeQuestions: PsikoData
+    };
+    router();
+    showPsikologiQuestion();
+}
+
+function showPsikologiQuestion() {
+    const q = State.psikologi.activeQuestions[State.psikologi.index];
+    document.getElementById('p-idx').innerText = State.psikologi.index + 1;
+    document.getElementById('p-text-situation').innerText = q.q;
+    const optsHtml = q.opts.map((opt, i) =>
+        `<div class="option" style="border-color: var(--primary);" onclick="answerPsikologi(${i}, this)">
+            <div class="option-letter" style="background: var(--primary-light); color: var(--primary);">${String.fromCharCode(65 + i)}</div>
+            <div>${opt}</div>
+        </div>`).join('');
+    document.getElementById('p-options').innerHTML = optsHtml;
+    document.getElementById('p-progress').style.width = `${((State.psikologi.index + 1) / State.psikologi.activeQuestions.length) * 100}%`;
+}
+
+function answerPsikologi(idx, btn) {
+    const q = State.psikologi.activeQuestions[State.psikologi.index];
+    const opts = document.getElementById('p-options').children;
+    for (let o of opts) o.style.pointerEvents = 'none';
+    if (idx === q.ans) {
+        btn.classList.add('correct');
+        State.psikologi.score += State.psikologi.pointsPerQ;
+    } else {
+        btn.classList.add('wrong');
+        if (opts[q.ans]) opts[q.ans].classList.add('correct');
+    }
+    setTimeout(() => {
+        if (window.location.hash !== '#/psikologi' || !State.psikologi.active) return;
+        State.psikologi.index++;
+        if (State.psikologi.index < State.psikologi.activeQuestions.length) showPsikologiQuestion();
+        else finishPsikologi();
+    }, 1500);
+}
+
+function finishPsikologi() {
+    State.scores.psikologi = Math.round(State.psikologi.score);
+    saveScores();
+    State.psikologi.active = false;
+    window.location.hash = '#/dashboard';
+    toast(`Tes Psikologi Selesai! Skor Anda: ${State.scores.psikologi}`, "success");
+}
+
+// ==========================================
+// 9. WAWANCARA
+// ==========================================
+const InterviewData = [
+    { q: "Menurut Anda, apa VISI dan MISI utama yang harus dibawa untuk memajukan Padukuhan ini 5 tahun ke depan?", opts: ["Fokus pada pembangunan fisik jalan dan jembatan saja.", "Pemberdayaan SDM (Pemuda & UMKM) serta digitalisasi layanan padukuhan.", "Mengikuti semua program pemerintah tanpa inovasi."], ans: 1 },
+    { q: "Apa alasan utama dan motivasi terbesar Anda mencalonkan diri sebagai Pamong Dukuh (Dukuh)?", opts: ["Ingin memiliki kekuasaan dan mempermudah urusan pribadi.", "Ingin mengabdi dan membantu menyelesaikan permasalahan warga secara langsung.", "Karena diminta oleh teman dan tidak ada pekerjaan lain."], ans: 1 },
+    { q: "Sebutkan kelebihan (hard skill & soft skill) yang Anda miliki yang membuat Anda layak dipilih sebagai Dukuh!", opts: ["Kaya raya dan bisa membiayai kegiatan sendiri.", "Mampu berkomunikasi baik, berjiwa pemimpin, dan paham administrasi pemerintahan.", "Punya banyak massa pendukung."], ans: 1 },
+    { q: "Bagaimana tanggapan Anda jika ada warga yang menolak program kerja Anda di forum rapat?", opts: ["Tetap melaksanakan program karena saya yang berkuasa.", "Mendengarkan alasannya, berdiskusi mencari titik temu, dan transparan terkait tujuan program.", "Mengeluarkan warga tersebut dari forum."], ans: 1 },
+    { q: "Apabila Anda terpilih menjadi Dukuh, langkah konkret pertama apa yang akan Anda lakukan di bulan pertama?", opts: ["Merombak semua staf dan perangkat desa.", "Melakukan pendataan ulang warga, evaluasi program lama, dan silaturahmi ke RT/RW.", "Menaikkan iuran bulanan warga."], ans: 1 }
+];
+
+function renderWawancara() {
+    if (!State.wawancara.active) {
+        return `
+            <div class="text-center" style="padding: 2rem 0;">
+                <div style="font-size: 4rem; margin-bottom: 1rem;">🗣️</div>
+                <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Simulasi Tes Wawancara</h2>
+                <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
+                    Uji kepribadian, integritas, dan pemahaman Tupoksi Anda sebagai Calon Dukuh di hadapan Penguji.
+                </p>
+                <button class="btn btn-block" style="font-size: 1.2rem; padding: 1.25rem; max-width: 400px; margin: 0 auto;" onclick="startWawancara()">Mulai Wawancara</button>
+            </div>`;
+    }
+    return `
+        <div class="progress-bar"><div class="progress-fill" id="w-progress"></div></div>
+        <div style="text-align: center; font-weight: 700; color: var(--text-muted); margin-bottom: 2rem;">
+            Pertanyaan <span id="w-idx" style="color: var(--primary);">1</span> dari ${State.wawancara.activeQuestions.length}
+        </div>
+        <div style="background: var(--bg-card); padding: 2rem; border-radius: var(--radius-lg); border-left: 6px solid var(--primary); margin-bottom: 2rem; position: relative; box-shadow: var(--shadow-md);">
+            <div style="display: flex; gap: 1.5rem; align-items: flex-start;">
+                <div style="width: 70px; height: 70px; border-radius: 50%; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 40px; flex-shrink: 0; border: 3px solid var(--primary); box-shadow: var(--shadow-sm);">👨‍🏫</div>
+                <div style="flex: 1;">
+                    <span style="color: var(--primary); font-weight: 800; font-size: 1rem; display: block; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 1px;">Pewawancara:</span>
+                    <p style="font-size: 1.3rem; font-weight: 600; line-height: 1.6; font-family: 'Lora', serif; font-style: italic;">"<span id="w-text"></span>"</p>
+                </div>
+            </div>
+            <button class="btn btn-secondary" style="position: absolute; top: 1.5rem; right: 1.5rem; padding: 0.6rem; border-radius: 50%;" onclick="playWawancaraVoice()" title="Dengarkan Suara Penguji">🔊</button>
+        </div>
+        <div id="w-options" style="display: flex; flex-direction: column; gap: 1rem;"></div>`;
+}
+
+function startWawancara() {
+    State.wawancara = {
+        active: true, index: 0, score: 0,
+        pointsPerQ: 100 / InterviewData.length,
+        activeQuestions: InterviewData, isSpeaking: false
+    };
+    router();
+    showWawancaraQuestion();
+}
+
+function speakWawancaraText(text) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'id-ID';
+    const voices = State.media.ttsVoices;
+    let v = voices.find(x => x.name.toLowerCase().includes('male') || x.name.toLowerCase().includes('ardi'));
+    if (v) u.voice = v;
+    u.pitch = 0.9; u.rate = 0.95;
+    setTimeout(() => window.speechSynthesis.speak(u), 250);
+}
+
+function playWawancaraVoice() {
+    const el = document.getElementById('w-text');
+    if (el && el.innerText) speakWawancaraText(el.innerText);
+}
+
+function showWawancaraQuestion() {
+    const q = State.wawancara.activeQuestions[State.wawancara.index];
+    document.getElementById('w-idx').innerText = State.wawancara.index + 1;
+    document.getElementById('w-text').innerText = q.q;
+    speakWawancaraText(q.q);
+    const optsHtml = q.opts.map((opt, i) =>
+        `<div class="option" onclick="answerWawancara(${i}, this)">
+            <div class="option-letter">${String.fromCharCode(65 + i)}</div>
+            <div>${opt}</div>
+        </div>`).join('');
+    document.getElementById('w-options').innerHTML = optsHtml;
+    document.getElementById('w-progress').style.width = `${((State.wawancara.index + 1) / State.wawancara.activeQuestions.length) * 100}%`;
+}
+
+function answerWawancara(idx, btn) {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    const q = State.wawancara.activeQuestions[State.wawancara.index];
+    const opts = document.getElementById('w-options').children;
+    for (let o of opts) o.style.pointerEvents = 'none';
+    if (idx === q.ans) {
+        btn.classList.add('correct');
+        State.wawancara.score += State.wawancara.pointsPerQ;
+    } else {
+        btn.classList.add('wrong');
+        if (opts[q.ans]) opts[q.ans].classList.add('correct');
+    }
+    setTimeout(() => {
+        if (window.location.hash !== '#/wawancara' || !State.wawancara.active) return;
+        State.wawancara.index++;
+        if (State.wawancara.index < State.wawancara.activeQuestions.length) showWawancaraQuestion();
+        else finishWawancara();
+    }, 2000);
+}
+
+function finishWawancara() {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    State.scores.wawancara = Math.round(State.wawancara.score);
+    saveScores();
+    State.wawancara.active = false;
+    window.location.hash = '#/dashboard';
+    toast(`Sesi Wawancara Selesai! Skor Anda: ${State.scores.wawancara}`, "success");
+}
+
+// ==========================================
+// 10. KOMPUTER (Word/Excel/PPT)
+// ==========================================
 function renderKomputer() {
     return `
         <div class="text-center" style="margin-bottom: 2rem;">
@@ -302,7 +902,6 @@ function renderKomputer() {
             <div class="sub-tab" onclick="showKomputerTab('tab-excel')">2. Tabel Excel</div>
             <div class="sub-tab" onclick="showKomputerTab('tab-ppt')">3. Presentasi PPT</div>
         </div>
-        
         <div id="tab-office">
             <div id="office-intro" class="text-center" style="padding: 3rem 0;">
                 <h3 style="margin-bottom: 1rem; font-size: 1.5rem;">Simulasi Mengetik Surat</h3>
@@ -315,7 +914,6 @@ function renderKomputer() {
                     <div class="btn btn-secondary active" id="doc-tab-1" onclick="switchWordPage(1)" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Halaman 1 (Surat)</div>
                     <div class="btn btn-secondary" id="doc-tab-2" onclick="switchWordPage(2)" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Halaman 2 (Lampiran)</div>
                 </div>
-                
                 <div id="word-page-1" class="doc-container">
                     <div style="text-align:center; font-weight:bold; font-family:'Plus Jakarta Sans'; margin-bottom: 2rem;">
                         PEMERINTAH KABUPATEN BANTUL<br>KALURAHAN BANGUNHARJO<br><hr style="margin: 1rem 0; border-top: 2px solid #000;">
@@ -332,7 +930,6 @@ function renderKomputer() {
                     <p>Mengingat pentingnya acara tersebut, kami mohon Bapak/Ibu dapat hadir tepat waktu. Demikian undangan ini kami sampaikan, atas perhatian dan kerja samanya kami ucapkan terima kasih.</p>
                     <textarea id="office-input-1" class="typing-area" placeholder="Ketik ulang teks di atas pada kolom ini..."></textarea>
                 </div>
-                
                 <div id="word-page-2" class="doc-container hidden">
                     <div style="text-align:center; font-weight:bold; font-family:'Plus Jakarta Sans'; margin-bottom: 2rem;">LAMPIRAN SURAT<br>Nomor: 002/23/X/2026</div>
                     <p style="font-weight:600; margin-top:1rem;">Rincian Agenda Rapat:</p>
@@ -348,7 +945,6 @@ function renderKomputer() {
                 <button class="btn btn-success btn-block" style="padding: 1rem; font-size: 1.1rem;" onclick="finishTypingTest()">Selesai & Simpan Skor Word</button>
             </div>
         </div>
-        
         <div id="tab-excel" class="hidden">
             <div id="excel-intro" class="text-center" style="padding: 3rem 0;">
                 <h3 style="margin-bottom: 1rem; font-size: 1.5rem;">Simulasi Pengolahan Data</h3>
@@ -389,7 +985,6 @@ function renderKomputer() {
                 <button class="btn btn-success btn-block" style="padding: 1rem; font-size: 1.1rem;" onclick="finishExcelTest()">Cek Jawaban Excel</button>
             </div>
         </div>
-        
         <div id="tab-ppt" class="hidden">
             <div id="ppt-editor">
                 <div class="text-center" style="margin-bottom: 1.5rem;">
@@ -399,19 +994,19 @@ function renderKomputer() {
                 <div style="background:var(--bg-card); padding:2rem; border-radius:var(--radius-lg); border: 2px solid var(--border); margin-bottom:1.5rem; max-height:400px; overflow-y:auto;">
                     <label style="font-weight:700; font-size:0.95rem; margin-bottom:0.5rem; display:block;">Slide 1 (Judul):</label>
                     <input type="text" id="ppt-s1-title" class="input-field" value="Rencana Pembangunan Padukuhan">
-                    
                     <label style="font-weight:700; font-size:0.95rem; margin-bottom:0.5rem; display:block; margin-top:1.5rem;">Slide 2 (Latar Belakang):</label>
-                    <textarea id="ppt-s2-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Kebutuhan fasilitas olahraga pemuda.\n- Penanganan sampah liar yang mendesak.</textarea>
-                    
+                    <textarea id="ppt-s2-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Kebutuhan fasilitas olahraga pemuda.
+- Penanganan sampah liar yang mendesak.</textarea>
                     <label style="font-weight:700; font-size:0.95rem; margin-bottom:0.5rem; display:block; margin-top:1.5rem;">Slide 3 (Anggaran & Solusi):</label>
-                    <textarea id="ppt-s3-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Anggaran: Dana Stimulan Rp 11.000.000.\n- Solusi: Pembagian porsi anggaran & Kerja Bakti Massal.</textarea>
-
+                    <textarea id="ppt-s3-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Anggaran: Dana Stimulan Rp 11.000.000.
+- Solusi: Pembagian porsi anggaran & Kerja Bakti Massal.</textarea>
                     <label style="font-weight:700; font-size:0.95rem; margin-bottom:0.5rem; display:block; margin-top:1.5rem;">Slide 4 (Jadwal Pelaksanaan):</label>
-                    <textarea id="ppt-s4-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Agustus: Sosialisasi & Persiapan\n- September: Pelaksanaan Pembangunan\n- Oktober: Evaluasi & Pelaporan</textarea>
+                    <textarea id="ppt-s4-body" class="input-field" style="height:80px; font-family:inherit; resize:vertical;">- Agustus: Sosialisasi & Persiapan
+- September: Pelaksanaan Pembangunan
+- Oktober: Evaluasi & Pelaporan</textarea>
                 </div>
                 <button class="btn btn-block" style="padding: 1rem; font-size: 1.1rem;" onclick="startPptPresentation()">Mulai Presentasi 4 Slide</button>
             </div>
-
             <div id="ppt-present" class="hidden">
                 <div class="timer-badge" id="ppt-timer">⏱️ Sisa Waktu: 03:00</div>
                 <div class="ppt-container">
@@ -425,28 +1020,232 @@ function renderKomputer() {
                 <div class="recording-box" id="pres-rec"><div class="dot"></div> Mendengarkan suara Anda...</div>
                 <button class="btn btn-warning btn-block" id="pres-btn" style="padding: 1rem; font-size: 1.1rem;" onclick="togglePres()">🎤 Mulai Bicara (Rekam Nilai)</button>
                 <div style="background:var(--bg-card); padding:1.5rem; margin-top:1.5rem; border-radius:var(--radius-md); font-size:0.95rem; border: 2px solid var(--border);" id="pres-log">
-                    <b>Instruksi:</b> Jelaskan isi slide. Sistem AI akan mendeteksi kata kunci: <br>
-                    <span style="color: var(--primary); font-weight: 700;">"Latar Belakang"</span>, <span style="color: var(--primary); font-weight: 700;">"Anggaran"</span>, <span style="color: var(--primary); font-weight: 700;">"Solusi"</span>, dan <span style="color: var(--primary); font-weight: 700;">"Jadwal"</span>.
+                    <b>Instruksi:</b> Jelaskan isi slide. Sistem AI akan mendeteksi kata kunci:
+                    <span style="color: var(--primary); font-weight: 700;">"Latar Belakang"</span>,
+                    <span style="color: var(--primary); font-weight: 700;">"Anggaran"</span>,
+                    <span style="color: var(--primary); font-weight: 700;">"Solusi"</span>, dan
+                    <span style="color: var(--primary); font-weight: 700;">"Jadwal"</span>.
                 </div>
             </div>
-        </div>
-    `;
+        </div>`;
 }
 
+function showKomputerTab(tabId) {
+    document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.sub-tab').forEach(t => { if (t.getAttribute('onclick')?.includes(tabId)) t.classList.add('active'); });
+    ['tab-office', 'tab-excel', 'tab-ppt'].forEach(id => document.getElementById(id)?.classList.add('hidden'));
+    document.getElementById(tabId)?.classList.remove('hidden');
+}
+function initKomputerMenu() { showKomputerTab('tab-office'); }
+
+function startTypingTest() {
+    State.office.typingActive = true;
+    State.office.typingEndTime = Date.now() + 300 * 1000;
+    document.getElementById('office-intro')?.classList.add('hidden');
+    document.getElementById('office-typing')?.classList.remove('hidden');
+    switchWordPage(1);
+    if (State.office.wordTimer) clearInterval(State.office.wordTimer);
+    State.office.wordTimer = runTimer('office-timer', State.office.typingEndTime, () => finishTypingTest());
+}
+
+function switchWordPage(page) {
+    State.office.wordPage = page;
+    document.getElementById('word-page-1')?.classList.add('hidden');
+    document.getElementById('word-page-2')?.classList.add('hidden');
+    document.getElementById('doc-tab-1')?.classList.remove('active');
+    document.getElementById('doc-tab-2')?.classList.remove('active');
+    document.getElementById('word-page-' + page)?.classList.remove('hidden');
+    document.getElementById('doc-tab-' + page)?.classList.add('active');
+}
+
+function getWordReferenceText(pageNum) {
+    const el = document.getElementById('word-page-' + pageNum);
+    if (!el) return '';
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('textarea').forEach(t => t.remove());
+    return clone.textContent.replace(/\s+/g, ' ').trim();
+}
+
+function finishTypingTest() {
+    if (State.office.wordTimer) { clearInterval(State.office.wordTimer); State.office.wordTimer = null; }
+    State.office.typingActive = false;
+
+    const user1 = (document.getElementById('office-input-1')?.value || '').trim();
+    const user2 = (document.getElementById('office-input-2')?.value || '').trim();
+    const ref1 = getWordReferenceText(1);
+    const ref2 = getWordReferenceText(2);
+
+    const match1 = textMatchPercent(user1, ref1);
+    const match2 = textMatchPercent(user2, ref2);
+    const score = Math.round((match1 + match2) / 2);
+
+    State.scores.word = score;
+    saveScores();
+
+    const el = document.getElementById('office-typing');
+    if (el) el.innerHTML = `
+        <div class="text-center" style="padding: 3rem 0;">
+            <h3 style="color: var(--success); font-size: 2rem; margin-bottom: 1rem;">Skor Ketik Word: ${score}</h3>
+            <p style="color: var(--text-muted); margin-bottom: 0.5rem;">Akurasi Halaman 1: ${match1}% | Halaman 2: ${match2}%</p>
+            <button class="btn btn-block" onclick="showKomputerTab('tab-excel')">Lanjut ke Excel</button>
+        </div>`;
+}
+
+function startExcelTest() {
+    State.office.excelActive = true;
+    State.office.excelEndTime = Date.now() + 180 * 1000;
+    document.getElementById('excel-intro')?.classList.add('hidden');
+    document.getElementById('excel-test')?.classList.remove('hidden');
+    switchExcelTab(1);
+    if (State.office.excelTimer) clearInterval(State.office.excelTimer);
+    State.office.excelTimer = runTimer('excel-timer', State.office.excelEndTime, () => finishExcelTest());
+}
+
+function switchExcelTab(tab) {
+    State.office.excelTab = tab;
+    document.getElementById('excel-sheet-1')?.classList.add('hidden');
+    document.getElementById('excel-sheet-2')?.classList.add('hidden');
+    document.getElementById('excel-tab-1')?.classList.remove('active');
+    document.getElementById('excel-tab-2')?.classList.remove('active');
+    document.getElementById('excel-sheet-' + tab)?.classList.remove('hidden');
+    document.getElementById('excel-tab-' + tab)?.classList.add('active');
+}
+
+function finishExcelTest() {
+    if (State.office.excelTimer) { clearInterval(State.office.excelTimer); State.office.excelTimer = null; }
+    State.office.excelActive = false;
+    const in1 = document.getElementById('input-excel-1');
+    const in2 = document.getElementById('input-excel-2');
+    if (!in1 || !in2) return;
+    const a1 = in1.value.replace(/[.,\s]/g, '');
+    const a2 = in2.value.replace(/[.,\s]/g, '');
+    let score = 0;
+    if (a1 === '11000000') score += 50;
+    if (a2 === '180') score += 50;
+    State.scores.excel = score;
+    saveScores();
+    const el = document.getElementById('excel-test');
+    if (el) el.innerHTML = `
+        <div class="text-center" style="padding: 3rem 0;">
+            <h3 style="color: var(--success); font-size: 2rem; margin-bottom: 1rem;">Skor Excel: ${score} / 100</h3>
+            <p style="color: var(--text-muted); margin-bottom: 0.5rem;">Anggaran: ${a1 === '11000000' ? '✔️ Benar' : '✖️ Salah'} | Data Warga: ${a2 === '180' ? '✔️ Benar' : '✖️ Salah'}</p>
+            <button class="btn btn-block" onclick="showKomputerTab('tab-ppt')">Lanjut ke PPT</button>
+        </div>`;
+}
+
+function startPptPresentation() {
+    const t1 = document.getElementById('ppt-s1-title').value;
+    const b2 = document.getElementById('ppt-s2-body').value.replace(/\n/g, '<br>');
+    const b3 = document.getElementById('ppt-s3-body').value.replace(/\n/g, '<br>');
+    const b4 = document.getElementById('ppt-s4-body').value.replace(/\n/g, '<br>');
+    State.ppt.data = [
+        { title: t1, content: `<p style="text-align:center; font-size:1.5rem; margin-top: 2rem;">Musyawarah Padukuhan Bangunharjo</p>` },
+        { title: "Latar Belakang", content: `<ul><li>${b2.replace(/- /g, '')}</li></ul>` },
+        { title: "Anggaran & Solusi", content: `<ul><li>${b3.replace(/- /g, '')}</li></ul>` },
+        { title: "Jadwal Pelaksanaan", content: `<ul><li>${b4.replace(/- /g, '')}</li></ul>` }
+    ];
+    State.ppt.currentSlide = 0;
+    State.ppt.active = true;
+    document.getElementById('ppt-editor')?.classList.add('hidden');
+    document.getElementById('ppt-present')?.classList.remove('hidden');
+    renderSlide();
+}
+
+function renderSlide() {
+    const slide = State.ppt.data[State.ppt.currentSlide];
+    const container = document.getElementById('slide-display');
+    if (!container) return;
+    container.innerHTML = `<h1>${slide.title}</h1><div>${slide.content}</div>`;
+    const ind = document.getElementById('slide-indicator');
+    if (ind) ind.innerText = `${State.ppt.currentSlide + 1} / ${State.ppt.data.length}`;
+    const prev = document.getElementById('btn-prev-slide');
+    const next = document.getElementById('btn-next-slide');
+    if (prev) { prev.style.opacity = State.ppt.currentSlide === 0 ? "0.3" : "1"; prev.style.pointerEvents = State.ppt.currentSlide === 0 ? "none" : "auto"; }
+    if (next) { next.style.opacity = State.ppt.currentSlide === State.ppt.data.length - 1 ? "0.3" : "1"; next.style.pointerEvents = State.ppt.currentSlide === State.ppt.data.length - 1 ? "none" : "auto"; }
+}
+function prevSlide() { if (State.ppt.currentSlide > 0) { State.ppt.currentSlide--; renderSlide(); } }
+function nextSlide() { if (State.ppt.currentSlide < State.ppt.data.length - 1) { State.ppt.currentSlide++; renderSlide(); } }
+
+if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+    presRecog = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    presRecog.lang = 'id-ID'; presRecog.continuous = true;
+    presRecog.onresult = (e) => {
+        const text = e.results[e.results.length - 1][0].transcript.toLowerCase();
+        const logEl = document.getElementById('pres-log');
+        if (logEl) logEl.innerHTML = `<b>🎤 Anda:</b> "${text}"`;
+        if (text.includes('latar belakang')) State.media.keywords['latar belakang'] = true;
+        if (text.includes('anggaran') || text.includes('dana')) State.media.keywords['anggaran'] = true;
+        if (text.includes('solusi') || text.includes('kerja bakti')) State.media.keywords['solusi'] = true;
+        if (text.includes('jadwal') || text.includes('pelaksanaan')) State.media.keywords['jadwal'] = true;
+    };
+    presRecog.onerror = (event) => {
+        if (event.error === 'not-allowed') {
+            toast("Akses mikrofon ditolak.", "error");
+            if (State.media.isRecording) togglePres();
+        }
+    };
+}
+
+function togglePres() {
+    if (!presRecog) return toast("Browser tidak mendukung mikrofon.", "error");
+    const btn = document.getElementById('pres-btn');
+    if (State.media.isRecording) {
+        presRecog.stop();
+        State.media.isRecording = false;
+        if (State.ppt.timer) { clearInterval(State.ppt.timer); State.ppt.timer = null; }
+        if (btn) { btn.innerText = "🎤 Mulai Bicara (Rekam Nilai)"; btn.classList.replace('btn-danger', 'btn-warning'); }
+        document.getElementById('pres-rec')?.classList.remove('active');
+        const count = Object.values(State.media.keywords).filter(v => v).length;
+        State.scores.presentasi = Math.round((count / 4) * 100);
+        State.ppt.active = false;
+        saveScores();
+        toast(`Presentasi Selesai! Kata kunci: ${count}/4. Skor: ${State.scores.presentasi}`, "success");
+        window.location.hash = '#/dashboard';
+    } else {
+        State.media.keywords = {};
+        State.media.isRecording = true;
+        if (btn) { btn.innerText = "⏹️ Hentikan Presentasi"; btn.classList.replace('btn-warning', 'btn-danger'); }
+        document.getElementById('pres-rec')?.classList.add('active');
+        presRecog.start();
+        let time = 180;
+        const timerEl = document.getElementById('ppt-timer');
+        if (State.ppt.timer) clearInterval(State.ppt.timer);
+        State.ppt.timer = setInterval(() => {
+            time--;
+            const m = Math.floor(time / 60);
+            const s = time % 60;
+            if (timerEl) timerEl.innerText = `⏱️ Sisa Waktu: ${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+            if (time <= 0 || !State.media.isRecording) {
+                clearInterval(State.ppt.timer);
+                State.ppt.timer = null;
+                if (State.media.isRecording) togglePres();
+            }
+        }, 1000);
+    }
+}
+
+// ==========================================
+// 11. PIDATO
+// ==========================================
 function renderPidato() {
-    let optionsHtml = State.pidatoList.map(p => `<option value="${p.id}">${p.judul}</option>`).join('');
+    if (!State.pidatoList || State.pidatoList.length === 0) {
+        return `
+            <div class="text-center" style="padding: 3rem 0;">
+                <div style="font-size: 4rem; margin-bottom: 1rem;">🎤</div>
+                <h2 style="font-size: 1.5rem; font-weight: 800; margin-bottom: 1rem; color: var(--warning);">Belum Ada Teks Pidato</h2>
+                <p style="color: var(--text-muted);">Sheet <code>TeksPidato</code> di Spreadsheet masih kosong. Hubungi admin.</p>
+            </div>`;
+    }
+    const optionsHtml = State.pidatoList.map(p => `<option value="${p.id}">${p.judul}</option>`).join('');
     return `
         <div class="text-center" style="margin-bottom: 2rem;">
             <h2 style="font-weight: 800; font-size: 2rem; margin-bottom: 0.5rem;">Praktik Pidato Bahasa Jawa</h2>
             <p style="color: var(--text-muted);">Uji kemampuan public speaking Anda menggunakan Bahasa Jawa yang baik dan benar.</p>
         </div>
-        
         <div style="display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1.5rem;">
             <div>
                 <label style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Pilih Teks Pidato:</label>
-                <select id="p-select" class="input-field" onchange="loadPidatoText()" style="margin-bottom:0;">
-                    ${optionsHtml}
-                </select>
+                <select id="p-select" class="input-field" onchange="loadPidatoText()" style="margin-bottom:0;">${optionsHtml}</select>
             </div>
             <div>
                 <label style="font-weight:700; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Pilih Suara TTS:</label>
@@ -457,593 +1256,80 @@ function renderPidato() {
                 </select>
             </div>
         </div>
-
         <div style="display:flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
             <button class="btn btn-success" style="flex:1; padding: 1rem; min-width: 150px;" id="pid-tts-btn" onclick="playPidatoTTS()">🔊 Dengarkan Teks</button>
             <button class="btn btn-danger hidden" style="flex:1; padding: 1rem; min-width: 100px;" id="pid-stop-btn" onclick="stopPidatoTTS()">⏹️ Stop TTS</button>
             <button class="btn" style="flex:1; padding: 1rem; min-width: 150px;" id="pid-btn" onclick="togglePidato()">🎤 Mulai Baca</button>
         </div>
-        
         <div class="recording-box" id="pid-rec"><div class="dot"></div> Mendengarkan suara Anda...</div>
-        
         <div id="p-text" class="pidato-box"></div>
-        <div id="p-score" class="text-center" style="font-weight:800; font-size:1.5rem; margin-top:1.5rem; color:var(--primary);"></div>
-    `;
+        <div id="p-score" class="text-center" style="font-weight:800; font-size:1.5rem; margin-top:1.5rem; color:var(--primary);"></div>`;
 }
 
-function renderRapat() {
-    if (!State.rapatDrama.active) {
-        return `
-            <div class="text-center" style="margin-bottom: 2rem;">
-                <h2 style="font-weight: 800; font-size: 2rem; margin-bottom: 0.5rem;">Simulasi Memimpin Rapat</h2>
-                <p style="color: var(--text-muted);">Uji naluri kepemimpinan Anda dalam menyelesaikan konflik warga.</p>
-            </div>
-            
-            <div style="display: grid; gap: 1rem; max-width: 600px; margin: 0 auto;">
-                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--primary);" onclick="startRapatDrama(0)">
-                    <h3 style="color: var(--primary); margin-bottom: 0.5rem; font-size: 1.2rem;">1. Pembangunan vs Sampah</h3>
-                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga RT 01 menuntut lapangan voli, RT 02 menuntut penanganan sampah. Dana terbatas.</p>
-                </div>
-                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--warning);" onclick="startRapatDrama(1)">
-                    <h3 style="color: var(--warning); margin-bottom: 0.5rem; font-size: 1.2rem;">2. Musyawarah Bantuan Sosial</h3>
-                    <p style="color: var(--text-muted); font-size: 0.95rem;">Data penerima Bansos menjadi sorotan. Warga mampu minta jatah, warga miskin belum terdata.</p>
-                </div>
-                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--success);" onclick="startRapatDrama(2)">
-                    <h3 style="color: var(--success); margin-bottom: 0.5rem; font-size: 1.2rem;">3. Iuran Keamanan & Ronda</h3>
-                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga baru menolak iuran karena merasa aman, warga lama protes karena merasa tidak adil.</p>
-                </div>
-                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--danger);" onclick="startRapatDrama(3)">
-                    <h3 style="color: var(--danger); margin-bottom: 0.5rem; font-size: 1.2rem;">4. Sengketa Tanah Kasultanan</h3>
-                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga mengklaim tanah miliknya dan ingin menjualnya, padahal status tanah adalah Kasultanan/Duluwung.</p>
-                </div>
-            </div>
-        `;
-    }
-    
-    return `
-        <div class="peace-container">
-            <div style="font-weight: 800; font-size: 1rem; color: var(--text-main); white-space: nowrap;">❤️ KETENANGAN: <span id="peace-val" style="color: var(--success); font-size: 1.2rem;">${State.rapatDrama.peace}</span>%</div>
-            <div class="peace-bar-bg">
-                <div class="peace-bar-fill" id="peace-bar" style="width:${State.rapatDrama.peace}%; background:${State.rapatDrama.peace > 50 ? 'var(--success)' : 'var(--danger)'};"></div>
-            </div>
-            <div class="peace-timer">⏱️ <span id="drama-timer">45</span>s</div>
-        </div>
-
-        <div class="drama-layout">
-            <div id="drama-dialogue" class="dialogue-text"></div>
-            <div id="drama-choices" style="margin-top: 2rem; display: flex; flex-direction: column; gap: 1rem;"></div>
-        </div>
-    `;
-}
-
-function renderWawancara() {
-    if (!State.wawancara.active) {
-        return `
-            <div class="text-center" style="padding: 2rem 0;">
-                <div style="font-size: 4rem; margin-bottom: 1rem;">🗣️</div>
-                <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Simulasi Tes Wawancara</h2>
-                <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Uji kepribadian, integritas, dan pemahaman Tupoksi Anda sebagai Calon Dukuh di hadapan Penguji.
-                </p>
-                <button class="btn btn-block" style="font-size: 1.2rem; padding: 1.25rem; max-width: 400px; margin: 0 auto;" onclick="startWawancara()">Mulai Wawancara</button>
-            </div>
-        `;
-    }
-    return `
-        <div class="progress-bar"><div class="progress-fill" id="w-progress"></div></div>
-        <div style="text-align: center; font-weight: 700; color: var(--text-muted); margin-bottom: 2rem;">
-            Pertanyaan <span id="w-idx" style="color: var(--primary);">1</span> dari ${State.wawancara.activeQuestions.length}
-        </div>
-        
-        <div style="background: var(--bg-card); padding: 2rem; border-radius: var(--radius-lg); border-left: 6px solid var(--primary); margin-bottom: 2rem; position: relative; box-shadow: var(--shadow-md);">
-            <div style="display: flex; gap: 1.5rem; align-items: flex-start;">
-                <div style="width: 70px; height: 70px; border-radius: 50%; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 40px; flex-shrink: 0; border: 3px solid var(--primary); box-shadow: var(--shadow-sm);">
-                    👨‍🏫
-                </div>
-                <div style="flex: 1;">
-                    <span style="color: var(--primary); font-weight: 800; font-size: 1rem; display: block; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 1px;">Pewawancara:</span>
-                    <p style="font-size: 1.3rem; font-weight: 600; line-height: 1.6; font-family: 'Lora', serif; font-style: italic;">"<span id="w-text"></span>"</p>
-                </div>
-            </div>
-            <button class="btn btn-secondary" style="position: absolute; top: 1.5rem; right: 1.5rem; padding: 0.6rem; border-radius: 50%;" onclick="playWawancaraVoice()" title="Dengarkan Suara Penguji">
-                🔊
-            </button>
-        </div>
-        
-        <div id="w-options" style="display: flex; flex-direction: column; gap: 1rem;"></div>
-    `;
-}
-
-// ==========================================
-// 6. CONTROLLERS
-// ==========================================
-function startQuiz(mode) { 
-    let filtered = State.questions;
-    if (mode === 'pg') filtered = filtered.filter(q => q.tipe === 'pg');
-    if (mode === 'uraian') filtered = filtered.filter(q => q.tipe === 'uraian');
-    if (filtered.length === 0) return alert("Tidak ada soal untuk kategori ini.");
-
-    const statusArr = new Array(filtered.length).fill('unanswered');
-
-    State.quiz = { active: true, index: 0, score: 0, timer: null, activeQuestions: filtered, pointsPerQ: 100 / filtered.length, status: statusArr, lastAnsweredIdx: -1 }; 
-    router(); 
-    let timeLimit = filtered.length * 60; 
-    if(timeLimit < 900) timeLimit = 900; 
-    runTimer('kuis-timer', timeLimit, () => finishQuiz()); 
-    showQuizQuestion(); 
-}
-
-function renderNavigator() {
-    const nav = document.getElementById('q-navigator');
-    if (!nav) return;
-    nav.innerHTML = '';
-    
-    State.quiz.activeQuestions.forEach((q, i) => {
-        const box = document.createElement('div');
-        box.className = 'q-nav-box';
-        
-        if (i === State.quiz.index) box.classList.add('active');
-        
-        const status = State.quiz.status[i];
-        if (status === 'correct') box.classList.add('correct');
-        else if (status === 'wrong') box.classList.add('wrong');
-        else if (status === 'answered') box.classList.add('answered');
-        
-        box.innerText = i + 1;
-        box.onclick = () => jumpToQuestion(i);
-        nav.appendChild(box);
-    });
-}
-
-function jumpToQuestion(targetIdx) {
-    State.quiz.index = targetIdx;
-    showQuizQuestion();
-}
-
-function showQuizQuestion() {
-    const q = State.quiz.activeQuestions[State.quiz.index];
-    document.getElementById('q-idx').innerText = State.quiz.index + 1;
-    document.getElementById('q-text').innerText = q.question;
-    
-    const currentStatus = State.quiz.status[State.quiz.index];
-
-    if (q.tipe === 'uraian') {
-        let txtArea = document.getElementById('q-essay-input');
-        if (!txtArea) {
-            document.getElementById('q-options').innerHTML = `<textarea id="q-essay-input" class="input-field" style="height: 180px; font-family: inherit; font-size: 1.1rem; resize: vertical; line-height: 1.6;" placeholder="Ketik jawaban uraian Anda di sini (minimal 30 karakter)..."></textarea>`;
-        } else {
-            document.getElementById('q-options').innerHTML = `<textarea id="q-essay-input" class="input-field" style="height: 180px; font-family: inherit; font-size: 1.1rem; resize: vertical; line-height: 1.6;" placeholder="Ketik jawaban uraian Anda di sini (minimal 30 karakter)..."></textarea>`;
-        }
-        
-        document.getElementById('q-exp').style.display = 'none';
-        document.getElementById('q-next').disabled = false; 
-        document.getElementById('q-next').innerText = (State.quiz.index === State.quiz.activeQuestions.length - 1) ? "Selesai & Simpan" : "Lanjut Soal Berikutnya ➔";
-    } else {
-        const rawAnswer = String(q.answer).trim();
-        let correctIdx = -1;
-        if (/^[0-3]$/.test(rawAnswer)) correctIdx = parseInt(rawAnswer);
-        else if (/^[A-D][\.\s]*$/i.test(rawAnswer)) correctIdx = ['A','B','C','D'].indexOf(rawAnswer.charAt(0).toUpperCase());
-        else {
-            const clean = (str) => String(str).toUpperCase().replace(/[^A-Z0-9]/g, '');
-            const cleanKey = clean(rawAnswer);
-            correctIdx = q.options.findIndex(opt => clean(opt) === cleanKey);
-            if (correctIdx === -1) correctIdx = q.options.findIndex(opt => clean(opt).includes(cleanKey) || cleanKey.includes(clean(opt)));
-            if (correctIdx === -1 && ['A','B','C','D'].includes(rawAnswer.charAt(0).toUpperCase())) correctIdx = ['A','B','C','D'].indexOf(rawAnswer.charAt(0).toUpperCase());
-        }
-
-        let optsHtml = q.options.map((opt, i) => {
-            let optClass = 'option';
-            if (currentStatus !== 'unanswered') {
-                if (i === correctIdx) optClass += ' correct';
-                else if (currentStatus === 'wrong' && i === State.quiz.lastAnsweredIdx) optClass += ' wrong';
-            }
-
-            return `<div class="${optClass}" onclick="answerQuiz(${i}, this)" style="${currentStatus !== 'unanswered' ? 'pointer-events:none;' : ''}">
-                <div class="option-letter">${String.fromCharCode(65+i)}</div>
-                <div>${opt}</div>
-            </div>`;
-        }).join('');
-        
-        document.getElementById('q-options').innerHTML = optsHtml;
-        
-        if(currentStatus !== 'unanswered') {
-            document.getElementById('q-exp').innerHTML = `<b>💡 Pembahasan:</b> ${q.explanation || 'Tidak ada pembahasan.'}`;
-            document.getElementById('q-exp').style.display = 'block';
-            document.getElementById('q-next').disabled = false;
-        } else {
-            document.getElementById('q-exp').style.display = 'none';
-            document.getElementById('q-next').disabled = true;
-        }
-        
-        document.getElementById('q-next').innerText = (State.quiz.index === State.quiz.activeQuestions.length - 1) ? "Selesai & Simpan" : "Lanjut Soal Berikutnya ➔";
-    }
-    
-    document.getElementById('q-progress').style.width = `${((State.quiz.index + 1) / State.quiz.activeQuestions.length) * 100}%`;
-    renderNavigator();
-}
-
-function answerQuiz(idx, el) {
-    const q = State.quiz.activeQuestions[State.quiz.index];
-    const opts = document.getElementById('q-options').children;
-    for(let o of opts) o.style.pointerEvents = 'none';
-
-    const rawAnswer = String(q.answer).trim();
-    let correctIdx = -1;
-
-    if (/^[0-3]$/.test(rawAnswer)) {
-        correctIdx = parseInt(rawAnswer);
-    } else if (/^[A-D][\.\s]*$/i.test(rawAnswer)) {
-        correctIdx = ['A','B','C','D'].indexOf(rawAnswer.charAt(0).toUpperCase());
-    } else {
-        const clean = (str) => String(str).toUpperCase().replace(/[^A-Z0-9]/g, '');
-        const cleanKey = clean(rawAnswer);
-        correctIdx = q.options.findIndex(opt => clean(opt) === cleanKey);
-        if (correctIdx === -1) correctIdx = q.options.findIndex(opt => clean(opt).includes(cleanKey) || cleanKey.includes(clean(opt)));
-        if (correctIdx === -1 && ['A','B','C','D'].includes(rawAnswer.charAt(0).toUpperCase())) correctIdx = ['A','B','C','D'].indexOf(rawAnswer.charAt(0).toUpperCase());
-    }
-
-    const isCorrect = (idx === correctIdx);
-
-    if (isCorrect) {
-        el.classList.add('correct');
-        State.quiz.score += State.quiz.pointsPerQ;
-        State.quiz.status[State.quiz.index] = 'correct';
-    } else {
-        el.classList.add('wrong');
-        if (correctIdx !== -1 && correctIdx < opts.length) {
-            opts[correctIdx].classList.add('correct');
-        }
-        State.quiz.status[State.quiz.index] = 'wrong';
-        State.quiz.lastAnsweredIdx = idx;
-    }
-
-    document.getElementById('q-score').innerText = Math.round(State.quiz.score);
-    document.getElementById('q-exp').innerHTML = `<b>💡 Pembahasan:</b> ${q.explanation || 'Tidak ada pembahasan.'}`;
-    document.getElementById('q-exp').style.display = 'block';
-    document.getElementById('q-next').disabled = false;
-    renderNavigator();
-}
-
-function evaluateEssay(userAnswer, correctAnswerText) {
-    if (!correctAnswerText || typeof correctAnswerText !== 'string') return true;
-    const cleanUser = userAnswer.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
-    const cleanRef = correctAnswerText.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
-    const refKeywords = cleanRef.split(/\s+/).filter(word => word.length > 3);
-    if (refKeywords.length === 0) return true;
-    let matchCount = 0;
-    refKeywords.forEach(keyword => { if (cleanUser.includes(keyword)) matchCount++; });
-    return ((matchCount / refKeywords.length) * 100) >= 40;
-}
-
-function nextQuizQuestion() {
-    const q = State.quiz.activeQuestions[State.quiz.index];
-    
-    if (q.tipe === 'uraian' && State.quiz.status[State.quiz.index] === 'unanswered') {
-        const userText = document.getElementById('q-essay-input').value.trim();
-        if (userText.length < 30) {
-            alert("Jawaban terlalu pendek. Minimal 30 karakter.");
-            return; 
-        }
-        if (evaluateEssay(userText, q.answer)) {
-            State.quiz.score += State.quiz.pointsPerQ;
-            document.getElementById('q-score').innerText = Math.round(State.quiz.score);
-            alert("✅ Jawaban sesuai kunci! Poin ditambahkan.");
-        } else {
-            alert("❌ Jawaban kurang lengkap/kurang tepat.");
-        }
-        State.quiz.status[State.quiz.index] = 'answered'; 
-        renderNavigator();
-    }
-
-    let nextIdx = State.quiz.index + 1;
-    
-    if (nextIdx < State.quiz.activeQuestions.length) {
-        State.quiz.index = nextIdx;
-        showQuizQuestion();
-    } else {
-        const skippedIdx = State.quiz.status.findIndex(s => s === 'unanswered');
-        if (skippedIdx !== -1) {
-            alert("Masih ada soal yang belum dijawab. Sistem mengarahkan Anda ke soal tersebut.");
-            State.quiz.index = skippedIdx;
-            showQuizQuestion();
-        } else {
-            finishQuiz();
-        }
-    }
-}
-
-function finishQuiz() { 
-    if(State.quiz.timer) clearInterval(State.quiz.timer); 
-    State.scores.kuis = Math.round(State.quiz.score); saveScores(); 
-    State.quiz.active = false; window.location.hash = '#/dashboard'; 
-    alert(`Ujian Selesai! Skor Anda: ${State.scores.kuis}`); 
-}
-
-// --- TES PSIKOLOGI (50 SOAL APMD) ---
-const PsikoData = [
-    // --- LOGIKA & PERUMPAMAAN ---
-    { q: "Semua Dukuh adalah pemimpin. Sebagian pemimpin adalah pendengar yang baik. Maka...", opts: ["Semua Dukuh pendengar yang baik.", "Sebagian Dukuh adalah pendengar yang baik.", "Tidak ada Dukuh yang pendengar baik.", "Semua pendengar baik adalah Dukuh."], ans: 1 },
-    { q: "Jika hujan turun, jalan menjadi basah. Jalan tidak basah. Kesimpulannya...", opts: ["Hujan turun.", "Hujan tidak turun.", "Jalan tetap kering.", "Tidak bisa disimpulkan."], ans: 1 },
-    { q: "Analogi: Dokter : Rumah Sakit = Petani : ...", opts: ["Cangkul", "Sawah", "Padi", "Traktor"], ans: 1 },
-    { q: "Analogi: Kepala Dukuh : Padukuhan = Lurah : ...", opts: ["Kecamatan", "Kalurahan", "Kabupaten", "Provinsi"], ans: 1 },
-    { q: "Semua A adalah B. Semua B adalah C. Maka...", opts: ["Semua C adalah A.", "Semua A adalah C.", "Sebagian C adalah A.", "Tidak ada kesimpulan."], ans: 1 },
-    { q: "Andi lebih tua dari Budi. Budi lebih tua dari Cici. Siapa yang paling muda?", opts: ["Andi", "Budi", "Cici", "Tidak tahu"], ans: 2 },
-    { q: "Jika 3 ekor sapi memakan rumput 3 lapangan dalam 3 hari. Berapa lapangan yang dimakan 6 sapi dalam 6 hari?", opts: ["6 lapangan", "9 lapangan", "12 lapangan", "18 lapangan"], ans: 2 },
-    { q: "Buku A lebih tebal dari Buku B. Buku C lebih tipis dari Buku A. Buku B lebih tebal dari Buku C. Siapa yang paling tebal?", opts: ["Buku A", "Buku B", "Buku C", "Buku D"], ans: 0 },
-    { q: "Analogi: Uang : Dompet = Air : ...", opts: ["Gelas", "Minum", "Haus", "Hujan"], ans: 0 },
-    { q: "Anda melihat 5 burung di pohon. Anda menembak 1. Berapa sisa burung di pohon?", opts: ["4", "1", "0", "5"], ans: 2 },
-    { q: "Sebuah jam dinding berdentang 6 kali dalam 5 detik. Berapa waktu yang dibutuhkan untuk berdentang 12 kali?", opts: ["10 detik", "11 detik", "12 detik", "15 detik"], ans: 1 },
-    { q: "Analogi: Rumah : Atap = Tubuh : ...", opts: ["Kaki", "Tangan", "Kepala", "Rambut"], ans: 2 },
-    { q: "Jika Anda berjalan 10 meter ke utara, lalu 10 meter ke selatan. Di mana posisi Anda?", opts: ["10 meter dari awal", "Di tempat awal", "20 meter dari awal", "Tidak tahu"], ans: 1 },
-    { q: "Semua bunga mawar berwarna merah. Sebagian bunga di taman adalah mawar. Maka...", opts: ["Semua bunga di taman merah.", "Sebagian bunga di taman merah.", "Tidak ada bunga merah.", "Semua merah adalah mawar."], ans: 1 },
-    { q: "Mana yang tidak sekelompok?", opts: ["Apel", "Jeruk", "Mangga", "Wortel"], ans: 3 },
-    { q: "Mana yang tidak sekelompok?", opts: ["Dukuh", "Lurah", "Bupati", "Guru"], ans: 3 },
-    { q: "Kebalikan dari 'Abadi' adalah...", opts: ["Kekal", "Fana", "Lestari", "Awet"], ans: 1 },
-    { q: "Kebalikan dari 'Sederhana' adalah...", opts: ["Mewah", "Kaya", "Boros", "Hemat"], ans: 0 },
-    { q: "Analogi: Buku : Halaman = Tangga : ...", opts: ["Kayu", "Anak Tangga", "Rumah", "Bangunan"], ans: 1 },
-    { q: "Jika P > Q dan Q > R, maka...", opts: ["P < R", "P > R", "P = R", "R > P"], ans: 1 },
-
-    // --- SIKAP & SOAL CERITA (SJT) ---
-    { q: "Anda mendapati dua warga bersitegang masalah batas tanah. Warga A membawa parang. Apa tindakan pertama Anda?", opts: ["Membiarkan mereka.", "Mendekati Warga A dengan tenang, meminta parangnya diturunkan, lalu memisahkan mereka.", "Memarahi keduanya."], ans: 1 },
-    { q: "Ada tawaran proyek dari pihak swasta. Mereka menawarkan 'uang pelicin'. Sebagai Dukuh, Anda...", opts: ["Menerima uang untuk kas padukuhan.", "Menolak tegas dan menjelaskan bahwa semua harus sesuai prosedur.", "Menerima uangnya diam-diam."], ans: 1 },
-    { q: "Anda memiliki 3 agenda mendesak: 1) Rapat di Kapanewon, 2) Warga sakit, 3) Tamu Dinas. Prioritas Anda?", opts: ["Mendelegasikan urusan warga, pergi ke rapat.", "Membatalkan semua agenda dan menangani warga sakit.", "Menugaskan staf mengurus warga sakit, lalu minta izin telat rapat."], ans: 1 },
-    { q: "Proyek jembatan gagal karena kontraktor kabur. Warga sangat marah. Anda...", opts: ["Menyalahkan kontraktor.", "Meminta maaf, menjelaskan kronologinya, dan berjanji mencari solusi.", "Menghindari warga."], ans: 1 },
-    { q: "Warga kaya meminta izin memotong jalan lingkungan demi memperluas rumah. Warga lain resah. Anda...", opts: ["Mengizinkan karena dia menyumbang.", "Menolak tegas karena jalan umum tidak boleh diprivatisasi.", "Mengizinkan tapi minta uang kompensasi."], ans: 1 },
-    { q: "Pemuda di padukuhan sering mabuk-mabukan. Anda...", opts: ["Melaporkan ke polisi.", "Mendekati secara personal dan menawarkan wadah Karang Taruna.", "Membiarkan saja."], ans: 1 },
-    { q: "Warga RT 01 dan RT 02 berselisih soal jadwal ronda. Anda...", opts: ["Memarahi RT 02.", "Mempertemukan kedua ketua RT dan menyusun ulang jadwal adil.", "Membiarkan saja."], ans: 1 },
-    { q: "Ada laporan staf Anda melakukan pungli (pungutan liar).", opts: ["Langsung memecat staf.", "Memanggil staf, klarifikasi internal, dan mencari bukti.", "Mengabaikan laporan."], ans: 1 },
-    { q: "Musim kemarau menyebabkan sumur warga kering. Dana terbatas. Anda...", opts: ["Meminta warga menampung air hujan.", "Bersama warga gotong royong mencari sumber mata air.", "Menyalahkan cuaca."], ans: 1 },
-    { q: "Tokoh masyarakat sering mengkritik kebijakan Anda di depan umum.", opts: ["Mengucilkan tokoh tersebut.", "Mengajaknya berdiskusi secara pribadi (empat mata).", "Membalas kritikannya."], ans: 1 },
-    { q: "Anda melihat warga membuang sampah ke sungai. Tindakan Anda?", opts: ["Membiarkan karena itu hak warga.", "Menegur dengan sopan dan mengingatkan tentang banjir.", "Melaporkan langsung ke polisi."], ans: 1 },
-    { q: "Warga meminta bantuan dana untuk hajatan, namun kas padukuhan kosong. Anda...", opts: ["Memberikan janji palsu.", "Menjelaskan kondisi kas secara transparan dan menawarkan bantuan tenaga.", "Memarahi warga karena meminta terus."], ans: 1 },
-    { q: "Saat rapat, ada warga yang terus memotong pembicaraan Anda. Anda...", opts: ["Membentaknya.", "Mempersilakannya bicara dulu, lalu menanggapi dengan tenang.", "Mengabaikannya."], ans: 1 },
-    { q: "Anda dihadapkan pada dua warga yang berebut bantuan sosial. Anda...", opts: ["Membaginya dua secara paksa.", "Mengecek data TKSK siapa yang lebih berhak.", "Mengembalikan uang ke pemerintah."], ans: 1 },
-    { q: "Seorang warga meminta Anda memalsukan surat keterangan miskin. Anda...", opts: ["Menuruti karena kasihan.", "Menolak tegas karena melanggar hukum.", "Meminta uang imbalan."], ans: 1 },
-    { q: "Pemuda padukuhan ingin membuat kegiatan yang berisiko (balap liar). Anda...", opts: ["Mengizinkan.", "Mengarahkan mereka ke kegiatan positif/olahraga resmi.", "Melarang tanpa penjelasan."], ans: 1 },
-    { q: "Warga lansia mengeluh kesulitan mengambil bantuan. Anda...", opts: ["Menyuruhnya mengambil sendiri.", "Mengantarkan bantuan langsung ke rumahnya.", "Meminta RT yang mengurus."], ans: 1 },
-    { q: "Ada tawaran menjadi pengurus partai politik tertentu. Sebagai Dukuh, Anda...", opts: ["Menerima untuk mencari kekuatan.", "Menolak karena Dukuh harus netral.", "Menerima diam-diam."], ans: 1 },
-    { q: "Warga Anda ada yang meninggal tapi tidak ada ahli waris. Anda...", opts: ["Membiarkan jenazah terbengkalai.", "Mengkoordinasi pemakaman secara kekeluargaan dan adat.", "Melaporkan ke media sosial."], ans: 1 },
-    { q: "Anda salah mengeluarkan kebijakan yang membuat warga rugi. Anda...", opts: ["Menyalahkan staf.", "Meminta maaf secara terbuka dan segera memperbaiki kesalahan.", "Pura-pura tidak tahu."], ans: 1 },
-    { q: "Saat Anda berbicara di forum, ada warga yang menertawakan Anda. Anda...", opts: ["Marah dan meninggalkan forum.", "Tetap tenang dan melanjutkan pembicaraan.", "Membalas dengan ejekan."], ans: 1 },
-    { q: "Bantuan sembako dari pemerintah datang terlambat. Warga marah. Anda...", opts: ["Menyalahkan pemerintah pusat.", "Menjelaskan proses pengiriman dan meredakan emosi warga.", "Bersembunyi di rumah."], ans: 1 },
-    { q: "Staf Anda bekerja lambat. Anda...", opts: ["Memarahinya di depan umum.", "Menegurnya secara pribadi dan mencari tahu kendalanya.", "Menggantikannya."], ans: 1 },
-    { q: "Warga ingin menjual tanah warisan untuk berfoya-foya. Anda...", opts: ["Membiarkan.", "Mengingatkan agar uang digunakan untuk hal produktif.", "Meminta bagian."], ans: 1 },
-    { q: "Ada warga baru yang belum melapor ke RT. Anda...", opts: ["Mengusirnya.", "Mendatangi dan meminta melengkapi administrasi dengan ramah.", "Mengabaikannya."], ans: 1 },
-    { q: "Anda diminta memimpin doa di acara lintas agama. Anda...", opts: ["Menolak.", "Memberikan kesempatan pemuka agama untuk memimpin doa.", "Memaksa doa sesuai agama Anda."], ans: 1 },
-    { q: "Anggota keluarga Anda ingin diprioritaskan dalam proyek padukuhan. Anda...", opts: ["Memprioritaskannya.", "Menolak dan tetap profesional sesuai aturan.", "Memberi jatah kecil."], ans: 1 },
-    { q: "Warga mengeluh jalan rusak. Anda belum punya dana. Anda...", opts: ["Berdiam diri.", "Mengajak gotong royong sementara dan mengusulkan dana ke Kalurahan.", "Menyalahkan cuaca."], ans: 1 },
-    { q: "Seorang warga meminta Anda menjadi juru damai masalah keluarga, tapi Anda tidak sanggup. Anda...", opts: ["Memaksakan diri.", "Merujuk ke pihak yang lebih ahli (psikolog/tokoh agama).", "Mengabaikannya."], ans: 1 }
-];
-
-function startPsikologi() {
-    State.psikologi = { active: true, index: 0, score: 0, activeQuestions: PsikoData };
-    router();
-    showPsikologiQuestion();
-}
-
-function showPsikologiQuestion() {
-    const q = State.psikologi.activeQuestions[State.psikologi.index];
-    document.getElementById('p-idx').innerText = State.psikologi.index + 1;
-    document.getElementById('p-text-situation').innerText = q.q;
-    
-    let optsHtml = q.opts.map((opt, i) => 
-        `<div class="option" style="border-color: var(--primary);" onclick="answerPsikologi(${i}, this)">
-            <div class="option-letter" style="background: var(--primary-light); color: var(--primary);">${String.fromCharCode(65+i)}</div>
-            <div>${opt}</div>
-        </div>`
-    ).join('');
-    document.getElementById('p-options').innerHTML = optsHtml;
-    document.getElementById('p-progress').style.width = `${((State.psikologi.index + 1) / State.psikologi.activeQuestions.length) * 100}%`;
-}
-
-function answerPsikologi(idx, btn) {
-    const q = State.psikologi.activeQuestions[State.psikologi.index];
-    const opts = document.getElementById('p-options').children;
-    for(let o of opts) o.style.pointerEvents = 'none';
-
-    if (idx === q.ans) {
-        btn.classList.add('correct');
-        // 50 Soal, skor per soal = 100/50 = 2
-        State.psikologi.score += 2; 
-    } else {
-        btn.classList.add('wrong');
-        opts[q.ans].classList.add('correct');
-    }
-
-    setTimeout(() => {
-        if (window.location.hash !== '#/psikologi' || !State.psikologi.active) return;
-        State.psikologi.index++;
-        if (State.psikologi.index < State.psikologi.activeQuestions.length) {
-            showPsikologiQuestion();
-        } else {
-            finishPsikologi();
-        }
-    }, 1500); 
-}
-
-function finishPsikologi() {
-    State.scores.psikologi = State.psikologi.score;
-    saveScores();
-    State.psikologi.active = false;
-    window.location.hash = '#/dashboard';
-    alert(`Tes Psikologi Selesai! Skor Anda: ${State.scores.psikologi}`);
-}
-
-// --- WAWANCARA (5 SOAL APMD) ---
-const InterviewData = [
-    { 
-        q: "Menurut Anda, apa VISI dan MISI utama yang harus dibawa untuk memajukan Padukuhan ini 5 tahun ke depan?", 
-        opts: [
-            "Fokus pada pembangunan fisik jalan dan jembatan saja.",
-            "Pemberdayaan SDM (Pemuda & UMKM) serta digitalisasi layanan padukuhan.",
-            "Mengikuti semua program pemerintah tanpa inovasi."
-        ], 
-        ans: 1 
-    },
-    { 
-        q: "Apa alasan utama dan motivasi terbesar Anda mencalonkan diri sebagai Pamong Dukuh (Dukuh)?", 
-        opts: [
-            "Ingin memiliki kekuasaan dan mempermudah urusan pribadi.",
-            "Ingin mengabdi dan membantu menyelesaikan permasalahan warga secara langsung.",
-            "Karena diminta oleh teman dan tidak ada pekerjaan lain."
-        ], 
-        ans: 1 
-    },
-    { 
-        q: "Sebutkan kelebihan (hard skill & soft skill) yang Anda miliki yang membuat Anda layak dipilih sebagai Dukuh!", 
-        opts: [
-            "Kaya raya dan bisa membiayai kegiatan sendiri.",
-            "Mampu berkomunikasi baik, berjiwa pemimpin, dan paham administrasi pemerintahan.",
-            "Punya banyak massa pendukung."
-        ], 
-        ans: 1 
-    },
-    { 
-        q: "Bagaimana tanggapan Anda jika ada warga yang menolak program kerja Anda di forum rapat?", 
-        opts: [
-            "Tetap melaksanakan program karena saya yang berkuasa.",
-            "Mendengarkan alasannya, berdiskusi mencari titik temu, dan transparan terkait tujuan program.",
-            "Mengeluarkan warga tersebut dari forum."
-        ], 
-        ans: 1 
-    },
-    { 
-        q: "Apabila Anda terpilih menjadi Dukuh, langkah konkret pertama apa yang akan Anda lakukan di bulan pertama?", 
-        opts: [
-            "Merombak semua staf dan perangkat desa.",
-            "Melakukan pendataan ulang warga, evaluasi program lama, dan silaturahmi ke RT/RW.",
-            "Menaikkan iuran bulanan warga."
-        ], 
-        ans: 1 
-    }
-];
-
-function startWawancara() {
-    State.wawancara = { active: true, index: 0, score: 0, activeQuestions: InterviewData, isSpeaking: false };
-    router();
-    showWawancaraQuestion();
-}
-
-function speakWawancaraText(text) {
+function populateVoices() {
     if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel(); 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'id-ID';
-    const voices = State.media.ttsVoices;
-    let selectedVoice = voices.find(v => v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('ardi'));
-    if (selectedVoice) utterance.voice = selectedVoice;
-    utterance.pitch = 0.9; utterance.rate = 0.95; 
-    setTimeout(() => { window.speechSynthesis.speak(utterance); }, 250);
+    const load = () => { State.media.ttsVoices = window.speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().includes('id')); };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
 }
 
-function playWawancaraVoice() {
-    const el = document.getElementById('w-text');
-    if (el && el.innerText) speakWawancaraText(el.innerText);
-}
-
-function showWawancaraQuestion() {
-    const q = State.wawancara.activeQuestions[State.wawancara.index];
-    document.getElementById('w-idx').innerText = State.wawancara.index + 1;
-    document.getElementById('w-text').innerText = q.q;
-    speakWawancaraText(q.q);
-
-    let optsHtml = q.opts.map((opt, i) => 
-        `<div class="option" onclick="answerWawancara(${i}, this)">
-            <div class="option-letter">${String.fromCharCode(65+i)}</div>
-            <div>${opt}</div>
-        </div>`
-    ).join('');
-    document.getElementById('w-options').innerHTML = optsHtml;
-    document.getElementById('w-progress').style.width = `${((State.wawancara.index + 1) / State.wawancara.activeQuestions.length) * 100}%`;
-}
-
-function answerWawancara(idx, btn) {
-    if(window.speechSynthesis) window.speechSynthesis.cancel(); 
-    const q = State.wawancara.activeQuestions[State.wawancara.index];
-    const opts = document.getElementById('w-options').children;
-    for(let o of opts) o.style.pointerEvents = 'none';
-
-    if (idx === q.ans) {
-        btn.classList.add('correct');
-        State.wawancara.score += 20; // 5 soal x 20 = 100
-    } else {
-        btn.classList.add('wrong');
-        opts[q.ans].classList.add('correct');
+function getPhonetic(word) {
+    const cleanWord = word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]/g, "");
+    const dict = { "inna": "inna", "rojiun": "rojingun", "rajiun": "rojingun", "sambekala": "sambekolo", "kawasa": "kuwoso", "sedaya": "sedoyo", "berkah": "berkah", "menika": "meniko", "jenazah": "jenazah", "wa": "wa", "allah": "alloh", "warrahmatullah": "warrahmatulloh", "takziyah": "takziyah", "tanaga": "tenogo", "mbok": "bok", "wabarakatuh": "wabarokatuh" };
+    if (dict[cleanWord]) {
+        let result = dict[cleanWord];
+        if (word[0] === word[0].toUpperCase()) result = result.charAt(0).toUpperCase() + result.slice(1);
+        const p = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/);
+        return result + (p ? p[0] : "");
     }
-
-    setTimeout(() => {
-        if (window.location.hash !== '#/wawancara' || !State.wawancara.active) return;
-        State.wawancara.index++;
-        if (State.wawancara.index < State.wawancara.activeQuestions.length) {
-            showWawancaraQuestion();
-        } else {
-            finishWawancara();
-        }
-    }, 2000); 
+    let w = cleanWord;
+    w = w.replace(/dh/g, 'd').replace(/th/g, 't');
+    if (w.endsWith('ah')) w = w.slice(0, -2) + 'oh';
+    else if (w.endsWith('a')) w = w.slice(0, -1) + 'o';
+    if (word[0] === word[0].toUpperCase()) w = w.charAt(0).toUpperCase() + w.slice(1);
+    const p = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/);
+    return w + (p ? p[0] : "");
 }
 
-function finishWawancara() {
-    if(window.speechSynthesis) window.speechSynthesis.cancel();
-    State.scores.wawancara = State.wawancara.score;
-    saveScores();
-    State.wawancara.active = false;
-    window.location.hash = '#/dashboard';
-    alert(`Sesi Wawancara Selesai! Skor Anda: ${State.scores.wawancara}`);
+function loadPidatoText() {
+    const selectEl = document.getElementById('p-select');
+    if (!selectEl) return;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    const val = selectEl.value;
+    const selected = State.pidatoList.find(p => String(p.id) === String(val));
+    if (!selected) return;
+
+    const rawTxt = String(selected.teks || '');
+    const paragraphs = rawTxt.split('\n');
+    let html = '';
+    pidatoWords = [];
+    let idx = 0;
+    paragraphs.forEach(p => {
+        if (!p.trim()) return;
+        html += "<p>";
+        const words = p.split(/(\s+)/);
+        words.forEach(w => {
+            if (w.trim() === '') html += w;
+            else { html += `<span class="word" id="pw-${idx}">${w}</span>`; pidatoWords.push(w); idx++; }
+        });
+        html += "</p>";
+    });
+    const pTextEl = document.getElementById('p-text');
+    if (pTextEl) pTextEl.innerHTML = html;
+    pidatoMatchCount = 0;
+    const scoreEl = document.getElementById('p-score');
+    if (scoreEl) scoreEl.innerText = '';
+    const ttsBtn = document.getElementById('pid-tts-btn');
+    if (ttsBtn) { ttsBtn.innerText = "🔊 Dengarkan Teks"; ttsBtn.disabled = false; }
+    document.getElementById('pid-stop-btn')?.classList.add('hidden');
 }
 
-// --- KOMPUTER ---
-function showKomputerTab(tabId) { 
-    document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active')); 
-    document.querySelectorAll('.sub-tab').forEach(t => { if(t.getAttribute('onclick').includes(tabId)) t.classList.add('active'); }); 
-    document.getElementById('tab-office').classList.add('hidden'); document.getElementById('tab-excel').classList.add('hidden'); document.getElementById('tab-ppt').classList.add('hidden'); 
-    document.getElementById(tabId).classList.remove('hidden'); 
-}
-function initKomputerMenu() { showKomputerTab('tab-office'); }
-function startTypingTest() { State.office.active = true; State.office.wordTimer = null; document.getElementById('office-intro').classList.add('hidden'); document.getElementById('office-typing').classList.remove('hidden'); switchWordPage(1); runTimer('office-timer', 300, () => finishTypingTest()); }
-function switchWordPage(page) { State.office.wordPage = page; document.getElementById('word-page-1').classList.add('hidden'); document.getElementById('word-page-2').classList.add('hidden'); document.getElementById('doc-tab-1').classList.remove('active'); document.getElementById('doc-tab-2').classList.remove('active'); document.getElementById('word-page-' + page).classList.remove('hidden'); document.getElementById('doc-tab-' + page).classList.add('active'); }
-function finishTypingTest() { if(State.office.wordTimer) clearInterval(State.office.wordTimer); const user1 = document.getElementById('office-input-1').value.trim(); const user2 = document.getElementById('office-input-2').value.trim(); let score = 0; if(user1.length > 20) score += 50; if(user2.length > 20) score += 50; State.scores.word = score; saveScores(); State.office.active = false; document.getElementById('office-typing').innerHTML = `<div class="text-center" style="padding: 3rem 0;"><h3 style="color: var(--success); font-size: 2rem; margin-bottom: 1rem;">Skor Ketik Word: ${score}</h3><p style="color: var(--text-muted); margin-bottom: 2rem;">Terima kasih telah mengetik kedua halaman.</p><button class="btn btn-block" onclick="showKomputerTab('tab-excel')">Lanjut ke Excel</button></div>`; }
-function startExcelTest() { State.office.active = true; document.getElementById('excel-intro').classList.add('hidden'); document.getElementById('excel-test').classList.remove('hidden'); switchExcelTab(1); runTimer('excel-timer', 180, () => finishExcelTest()); }
-function switchExcelTab(tab) { document.getElementById('excel-sheet-1').classList.add('hidden'); document.getElementById('excel-sheet-2').classList.add('hidden'); document.getElementById('excel-tab-1').classList.remove('active'); document.getElementById('excel-tab-2').classList.remove('active'); document.getElementById('excel-sheet-' + tab).classList.remove('hidden'); document.getElementById('excel-tab-' + tab).classList.add('active'); }
-function finishExcelTest() { if(State.office.excelTimer) clearInterval(State.office.excelTimer); const in1 = document.getElementById('input-excel-1'); const in2 = document.getElementById('input-excel-2'); if(!in1 || !in2) return; const ans1 = in1.value.replace(/[.,\s]/g, ''); const ans2 = in2.value.replace(/[.,\s]/g, ''); let score = 0; if (ans1 === "11000000") score += 50; if (ans2 === "180") score += 50; alert(`Cek Jawaban!\nAnggaran: ${ans1==="11000000"?'Benar':'Salah'}\nData Warga: ${ans2==="180"?'Benar':'Salah'}`); State.scores.excel = score; saveScores(); document.getElementById('excel-test').innerHTML = `<div class="text-center" style="padding: 3rem 0;"><h3 style="color: var(--success); font-size: 2rem; margin-bottom: 1rem;">Skor Excel: ${score} / 100</h3><button class="btn btn-block" onclick="showKomputerTab('tab-ppt')">Lanjut ke PPT</button></div>`; }
-function startPptPresentation() { const t1 = document.getElementById('ppt-s1-title').value; const b2 = document.getElementById('ppt-s2-body').value.replace(/\n/g, '<br>'); const b3 = document.getElementById('ppt-s3-body').value.replace(/\n/g, '<br>'); const b4 = document.getElementById('ppt-s4-body').value.replace(/\n/g, '<br>'); State.ppt.data = [{ title: t1, content: `<p style="text-align:center; font-size:1.5rem; margin-top: 2rem;">Musyawarah Padukuhan Bangunharjo</p>` }, { title: "Latar Belakang", content: `<ul><li>${b2.replace(/- /g, '')}</li></ul>` }, { title: "Anggaran & Solusi", content: `<ul><li>${b3.replace(/- /g, '')}</li></ul>` }, { title: "Jadwal Pelaksanaan", content: `<ul><li>${b4.replace(/- /g, '')}</li></ul>` }]; State.ppt.currentSlide = 0; document.getElementById('ppt-editor').classList.add('hidden'); document.getElementById('ppt-present').classList.remove('hidden'); renderSlide(); }
-function renderSlide() { const slide = State.ppt.data[State.ppt.currentSlide]; const container = document.getElementById('slide-display'); if(!container) return; container.innerHTML = `<h1>${slide.title}</h1><div>${slide.content}</div>`; const ind = document.getElementById('slide-indicator'); if(ind) ind.innerText = `${State.ppt.currentSlide + 1} / ${State.ppt.data.length}`; const prevBtn = document.getElementById('btn-prev-slide'); const nextBtn = document.getElementById('btn-next-slide'); if(prevBtn) { prevBtn.style.opacity = State.ppt.currentSlide === 0 ? "0.3" : "1"; prevBtn.style.pointerEvents = State.ppt.currentSlide === 0 ? "none" : "auto"; } if(nextBtn) { nextBtn.style.opacity = State.ppt.currentSlide === State.ppt.data.length - 1 ? "0.3" : "1"; nextBtn.style.pointerEvents = State.ppt.currentSlide === State.ppt.data.length - 1 ? "none" : "auto"; } }
-function prevSlide() { if(State.ppt.currentSlide > 0) { State.ppt.currentSlide--; renderSlide(); } }
-function nextSlide() { if(State.ppt.currentSlide < State.ppt.data.length - 1) { State.ppt.currentSlide++; renderSlide(); } }
-
-if(window.SpeechRecognition || window.webkitSpeechRecognition) { 
-    presRecog = new (window.SpeechRecognition || window.webkitSpeechRecognition)(); 
-    presRecog.lang = 'id-ID'; presRecog.continuous = true; 
-    presRecog.onresult = (e) => { 
-        let text = e.results[e.results.length-1][0].transcript.toLowerCase(); 
-        const logEl = document.getElementById('pres-log');
-        if(logEl) logEl.innerHTML = `<b>🎤 Anda:</b> "${text}"`; 
-        if(text.includes('latar belakang')) State.media.keywords['latar belakang'] = true; 
-        if(text.includes('anggaran') || text.includes('dana')) State.media.keywords['anggaran'] = true; 
-        if(text.includes('solusi') || text.includes('kerja bakti')) State.media.keywords['solusi'] = true; 
-        if(text.includes('jadwal') || text.includes('pelaksanaan')) State.media.keywords['jadwal'] = true; 
-    }; 
-    presRecog.onerror = (event) => { if(event.error === 'not-allowed') { alert("Akses mikrofon ditolak."); if(State.media.isRecording) togglePres(); } };
-}
-function togglePres() { if(!presRecog) return alert("Browser tidak mendukung mic."); const btn = document.getElementById('pres-btn'); if(State.media.isRecording) { presRecog.stop(); State.media.isRecording = false; if(btn) { btn.innerText = "🎤 Mulai Bicara (Rekam Nilai)"; btn.classList.replace('btn-danger', 'btn-warning'); } const rec = document.getElementById('pres-rec'); if(rec) rec.classList.remove('active'); const count = Object.values(State.media.keywords).filter(v=>v).length; State.scores.presentasi = Math.round((count/4)*100); saveScores(); alert(`Presentasi Selesai! Kata kunci disebut: ${count}/4. Skor: ${State.scores.presentasi}`); window.location.hash = '#/dashboard'; } else { State.media.keywords = {}; State.media.isRecording = true; if(btn) { btn.innerText = "⏹️ Hentikan Presentasi"; btn.classList.replace('btn-warning', 'btn-danger'); } const rec = document.getElementById('pres-rec'); if(rec) rec.classList.add('active'); presRecog.start(); let time = 180; const timerEl = document.getElementById('ppt-timer'); const interval = setInterval(() => { time--; let m = parseInt(time / 60); let s = parseInt(time % 60); if(timerEl) timerEl.innerText = `⏱️ Sisa Waktu: 0${m}:${s < 10 ? '0'+s : s}`; if(time <= 0 || !State.media.isRecording) { clearInterval(interval); if(State.media.isRecording) togglePres(); } }, 1000); } }
-
-// --- PIDATO JAWA (TTS & SPEECH RECOGNITION) ---
-function populateVoices() { 
-    if (!('speechSynthesis' in window)) return; 
-    const loadVoices = () => { 
-        State.media.ttsVoices = window.speechSynthesis.getVoices().filter(v => v.lang.includes('id') || v.lang.includes('ID')); 
-    }; 
-    loadVoices(); 
-    window.speechSynthesis.onvoiceschanged = loadVoices; 
-}
-
-function loadPidatoText() { const selectEl = document.getElementById('p-select'); if(!selectEl) return; if(window.speechSynthesis) window.speechSynthesis.cancel(); const val = selectEl.value; const selectedPidato = State.pidatoList.find(p => p.id === val); if (!selectedPidato) return; const rawTxt = selectedPidato.teks; let paragraphs = rawTxt.split('\n'); let htmlResult = ""; pidatoWords = []; let globalIdx = 0; paragraphs.forEach(p => { if(!p.trim()) return; htmlResult += "<p>"; let words = p.split(/(\s+)/); words.forEach(w => { if(w.trim() === '') { htmlResult += w; } else { htmlResult += `<span class="word" id="pw-${globalIdx}">${w}</span>`; pidatoWords.push(w); globalIdx++; } }); htmlResult += "</p>"; }); document.getElementById('p-text').innerHTML = htmlResult; pidatoMatchCount = 0; document.getElementById('p-score').innerText = ''; const ttsBtn = document.getElementById('pid-tts-btn'); if(ttsBtn) { ttsBtn.innerText = "🔊 Dengarkan Teks"; ttsBtn.disabled = false; } const stopBtn = document.getElementById('pid-stop-btn'); if(stopBtn) stopBtn.classList.add('hidden'); }
-function getPhonetic(word) { let cleanWord = word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]/g, ""); const dict = { "inna": "inna", "rojiun": "rojingun", "rajiun": "rojingun", "sambekala": "sambekolo", "kawasa": "kuwoso", "sedaya": "sedoyo", "berkah": "berkah", "menika": "meniko", "jenazah": "jenazah", "wa": "wa", "allah": "alloh", "warrahmatullah": "warrahmatulloh", "takziyah": "takziyah", "tanaga": "tenogo", "mbok": "bok", "wabarakatuh": "wabarokatuh" }; if (dict[cleanWord]) { let result = dict[cleanWord]; if (word[0] === word[0].toUpperCase()) result = result.charAt(0).toUpperCase() + result.slice(1); let punctuation = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/); return result + (punctuation ? punctuation[0] : ""); } let w = cleanWord; w = w.replace(/dh/g, 'd').replace(/th/g, 't'); if (w.endsWith('ah')) w = w.slice(0, -2) + 'oh'; else if (w.endsWith('a')) w = w.slice(0, -1) + 'o'; if (word[0] === word[0].toUpperCase()) w = w.charAt(0).toUpperCase() + w.slice(1); let punctuation = word.match(/[.,\/#!$%\^&\*;:{}=\-_`~()'’]$/); return w + (punctuation ? punctuation[0] : ""); }
-
-function playPidatoTTS() { 
-    if (!('speechSynthesis' in window)) return alert("Browser tidak mendukung suara."); 
+function playPidatoTTS() {
+    if (!('speechSynthesis' in window)) return toast("Browser tidak mendukung suara.", "error");
     const ttsBtn = document.getElementById('pid-tts-btn');
     const stopBtn = document.getElementById('pid-stop-btn');
-    
+    if (!ttsBtn || !stopBtn) return;
+
     if (State.media.ttsPaused) {
         window.speechSynthesis.resume();
         State.media.ttsPaused = false;
@@ -1051,177 +1337,137 @@ function playPidatoTTS() {
         if (currentHighlightIndex !== -1 && wordTimings[currentHighlightIndex]) {
             speechStartTime = performance.now() - wordTimings[currentHighlightIndex].start;
         }
-        syncInterval = requestAnimationFrame(syncHighlight);
+        syncInterval = requestAnimationFrame(syncHighlightLoop);
         return;
     }
-
     if (State.media.ttsPlaying && window.speechSynthesis.speaking) {
         window.speechSynthesis.pause();
         State.media.ttsPaused = true;
         ttsBtn.innerHTML = "▶️ Lanjutkan (Resume)";
-        if (syncInterval) cancelAnimationFrame(syncInterval);
+        if (syncInterval) { cancelAnimationFrame(syncInterval); syncInterval = null; }
         return;
     }
 
-    const selectEl = document.getElementById('p-select'); 
-    const val = selectEl.value; 
-    const selectedPidato = State.pidatoList.find(p => p.id === val); 
-    if (!selectedPidato) return; 
-    
-    window.speechSynthesis.cancel(); 
-    if (State.media.isRecording) togglePidato(); 
-    
-    const rawTxt = selectedPidato.teks; 
-    let phoneticText = " "; 
-    let wordIndices = []; 
-    let globalIdx = 0; 
-    let paragraphs = rawTxt.split('\n'); 
-    
-    paragraphs.forEach(p => { 
-        if(!p.trim()) { phoneticText += " \n "; return; } 
-        let words = p.split(/(\s+)/); 
-        words.forEach(w => { 
-            if(w.trim() === '') phoneticText += w; 
-            else { 
-                let phon = getPhonetic(w); 
-                let start = phoneticText.length; 
-                phoneticText += phon; 
-                let end = phoneticText.length; 
-                wordIndices.push({ originalIndex: globalIdx, start: start, end: end }); 
-                globalIdx++; 
-            } 
-        }); 
-        phoneticText += " \n "; 
-    }); 
-    
-    const utterance = new SpeechSynthesisUtterance(phoneticText); 
-    const voiceMode = document.getElementById('tts-voice-select').value; 
-    let selectedVoice = null; 
-    
-    if (State.media.ttsVoices.length > 0) { 
-        if (voiceMode === 'male') {
-            selectedVoice = State.media.ttsVoices.find(v => {
-                const name = v.name.toLowerCase();
-                return name.includes('male') || name.includes('pria') || name.includes('laki') || name.includes('andika') || name.includes('ardi');
-            }); 
-            if (selectedVoice) {
-                utterance.voice = selectedVoice;
-                utterance.pitch = 0.9; 
-            } else {
-                utterance.pitch = 0.5; 
-                utterance.rate = 0.9;
+    const selectEl = document.getElementById('p-select');
+    const val = selectEl?.value;
+    const selected = State.pidatoList.find(p => String(p.id) === String(val));
+    if (!selected) return toast("Pilih teks pidato terlebih dahulu.", "warning");
+
+    window.speechSynthesis.cancel();
+    if (State.media.isRecording) togglePidato();
+
+    const rawTxt = String(selected.teks || '');
+    let phoneticText = " ";
+    const wordIndices = [];
+    let globalIdx = 0;
+    rawTxt.split('\n').forEach(p => {
+        if (!p.trim()) { phoneticText += " \n "; return; }
+        const words = p.split(/(\s+)/);
+        words.forEach(w => {
+            if (w.trim() === '') phoneticText += w;
+            else {
+                const phon = getPhonetic(w);
+                const start = phoneticText.length;
+                phoneticText += phon;
+                wordIndices.push({ originalIndex: globalIdx, start, end: phoneticText.length });
+                globalIdx++;
             }
-        } 
-        else if (voiceMode === 'female') {
-            selectedVoice = State.media.ttsVoices.find(v => {
-                const name = v.name.toLowerCase();
-                return name.includes('female') || name.includes('wanita') || name.includes('gadis') || name.includes('damayanti');
-            }); 
-            if (selectedVoice) utterance.voice = selectedVoice;
-            utterance.pitch = 1.2; 
+        });
+        phoneticText += " \n ";
+    });
+
+    const u = new SpeechSynthesisUtterance(phoneticText);
+    const voiceMode = document.getElementById('tts-voice-select').value;
+    if (State.media.ttsVoices.length > 0) {
+        let v = null;
+        if (voiceMode === 'male') {
+            v = State.media.ttsVoices.find(x => { const n = x.name.toLowerCase(); return n.includes('male') || n.includes('pria') || n.includes('laki') || n.includes('andika') || n.includes('ardi'); });
+            u.pitch = v ? 0.9 : 0.5; u.rate = 0.9;
+        } else if (voiceMode === 'female') {
+            v = State.media.ttsVoices.find(x => { const n = x.name.toLowerCase(); return n.includes('female') || n.includes('wanita') || n.includes('gadis') || n.includes('damayanti'); });
+            u.pitch = 1.2;
         }
+        if (v) u.voice = v;
     } else {
-        if(voiceMode === 'male') utterance.pitch = 0.5;
-        if(voiceMode === 'female') utterance.pitch = 1.2;
+        if (voiceMode === 'male') u.pitch = 0.5;
+        if (voiceMode === 'female') u.pitch = 1.2;
     }
-    
-    utterance.lang = 'id-ID'; 
-    utterance.rate = 0.85; 
-    
-    ttsBtn.innerHTML = "⏸️ Jeda (Pause)"; 
+    u.lang = 'id-ID'; u.rate = 0.85;
+
+    ttsBtn.innerHTML = "⏸️ Jeda (Pause)";
     stopBtn.classList.remove('hidden');
     State.media.ttsPlaying = true;
     State.media.ttsPaused = false;
-    document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
-    
-    // --- KALKULASI WAKTU KONSERVATIF (ANTI MENDAHULUI SUARA) ---
+    document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+
     wordTimings = [];
-    let cumulativeTime = 0;
-    const rateFactor = 1 / (utterance.rate || 0.85);
-
-    pidatoWords.forEach((word) => {
-        // 250ms dasar + 60ms per huruf (sangat lambat, agar suara tidak didahului)
-        let duration = (250 + (word.length * 60)) * rateFactor; 
-        if (word.match(/[.,;:]/)) duration += (300 * rateFactor); 
-        if (word.match(/[.!?]/)) duration += (600 * rateFactor); 
-        wordTimings.push({ start: cumulativeTime, end: cumulativeTime + duration });
-        cumulativeTime += duration;
+    let cumulative = 0;
+    const rateFactor = 1 / (u.rate || 0.85);
+    pidatoWords.forEach(word => {
+        let duration = (250 + (word.length * 60)) * rateFactor;
+        if (word.match(/[.,;:]/)) duration += (300 * rateFactor);
+        if (word.match(/[.!?]/)) duration += (600 * rateFactor);
+        wordTimings.push({ start: cumulative, end: cumulative + duration });
+        cumulative += duration;
     });
-
     currentHighlightIndex = -1;
 
-    function syncHighlight() {
+    function syncHighlightLoop() {
         if (!State.media.ttsPlaying || State.media.ttsPaused) return;
-        
-        // Gunakan performance.now() untuk presisi tinggi
-        let elapsed = performance.now() - speechStartTime;
+        const elapsed = performance.now() - speechStartTime;
         let newIdx = -1;
-        
         for (let i = 0; i < wordTimings.length; i++) {
-            if (elapsed >= wordTimings[i].start) {
-                newIdx = i;
-            } else {
-                break;
-            }
+            if (elapsed >= wordTimings[i].start) newIdx = i; else break;
         }
-        
-        // Jika suara ternyata lebih cepat, onboundary yang akan mengoreksi
         if (newIdx !== -1 && newIdx !== currentHighlightIndex) {
             document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
             const span = document.getElementById(`pw-${newIdx}`);
             if (span) {
                 span.classList.add('tts-active');
                 const container = document.getElementById('p-text');
-                const offset = span.offsetTop - container.offsetTop - 50;
-                container.scrollTo({ top: offset, behavior: 'smooth' });
+                if (container) container.scrollTo({ top: span.offsetTop - container.offsetTop - 50, behavior: 'smooth' });
             }
             currentHighlightIndex = newIdx;
         }
-        
-        syncInterval = requestAnimationFrame(syncHighlight);
+        syncInterval = requestAnimationFrame(syncHighlightLoop);
     }
 
-    utterance.onstart = () => {
-        // Beri waktu 300ms untuk mesin TTS memuat audio awal
+    u.onstart = () => {
         setTimeout(() => {
             speechStartTime = performance.now();
-            syncInterval = requestAnimationFrame(syncHighlight);
+            syncInterval = requestAnimationFrame(syncHighlightLoop);
         }, 300);
     };
 
-    // --- AUTO-KOREKSI PAKSA (Jika onboundary didukung) ---
-    utterance.onboundary = (event) => { 
-        if (event.name === 'word') { 
-            const charIdx = event.charIndex; 
-            const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end); 
-            if (found) { 
-                // Paksa sinkronisasi waktu saat ini dengan index kata dari browser
+    u.onboundary = (event) => {
+        if (event.name === 'word') {
+            const charIdx = event.charIndex;
+            const found = wordIndices.find(w => charIdx >= w.start && charIdx < w.end);
+            if (found) {
                 speechStartTime = performance.now() - wordTimings[found.originalIndex].start;
                 currentHighlightIndex = found.originalIndex;
-                
-                document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
-                const span = document.getElementById(`pw-${found.originalIndex}`); 
+                document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+                const span = document.getElementById(`pw-${found.originalIndex}`);
                 if (span) {
-                    span.classList.add('tts-active'); 
+                    span.classList.add('tts-active');
                     const container = document.getElementById('p-text');
-                    const offset = span.offsetTop - container.offsetTop - 50;
-                    container.scrollTo({ top: offset, behavior: 'smooth' });
+                    if (container) container.scrollTo({ top: span.offsetTop - container.offsetTop - 50, behavior: 'smooth' });
                 }
-            } 
-        } 
-    }; 
-    
-    utterance.onend = () => { 
-        ttsBtn.innerHTML = "🔊 Dengarkan Teks"; 
-        ttsBtn.disabled = false; 
+            }
+        }
+    };
+
+    u.onend = () => {
+        ttsBtn.innerHTML = "🔊 Dengarkan Teks";
+        ttsBtn.disabled = false;
         stopBtn.classList.add('hidden');
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
-        if (syncInterval) cancelAnimationFrame(syncInterval);
-        document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active')); 
-    }; 
-    
-    setTimeout(() => { window.speechSynthesis.speak(utterance); }, 150); 
+        if (syncInterval) { cancelAnimationFrame(syncInterval); syncInterval = null; }
+        document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
+    };
+
+    setTimeout(() => window.speechSynthesis.speak(u), 150);
 }
 
 function stopPidatoTTS() {
@@ -1229,27 +1475,80 @@ function stopPidatoTTS() {
         window.speechSynthesis.cancel();
         State.media.ttsPlaying = false;
         State.media.ttsPaused = false;
-        
-        if (syncInterval) {
-            cancelAnimationFrame(syncInterval);
-            syncInterval = null;
-        }
-        
+        if (syncInterval) { cancelAnimationFrame(syncInterval); syncInterval = null; }
         const ttsBtn = document.getElementById('pid-tts-btn');
         const stopBtn = document.getElementById('pid-stop-btn');
-        if(ttsBtn) ttsBtn.innerHTML = "🔊 Dengarkan Teks";
-        if(stopBtn) stopBtn.classList.add('hidden');
-        
+        if (ttsBtn) ttsBtn.innerHTML = "🔊 Dengarkan Teks";
+        if (stopBtn) stopBtn.classList.add('hidden');
         document.querySelectorAll('#p-text .word').forEach(el => el.classList.remove('tts-active'));
     }
 }
 
-function levenshteinDistance(a, b) { const matrix = []; for (let i = 0; i <= b.length; i++) matrix[i] = [i]; for (let j = 0; j <= a.length; j++) matrix[0][j] = j; for (let i = 1; i <= b.length; i++) { for (let j = 1; j <= a.length; j++) { if (b.charAt(i - 1) === a.charAt(j - 1)) matrix[i][j] = matrix[i - 1][j - 1]; else matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1)); } } return matrix[b.length][a.length]; }
-function evaluatePidato(trans) { const spoken = trans.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g,"").split(/\s+/).filter(w => w.length > 0); pidatoWords.forEach((rw, i) => { let clean = rw.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g,""); if (clean.length < 3) return; const isMatched = spoken.some(sw => { if (sw.length < 3) return false; if (sw.includes(clean) || clean.includes(sw)) return true; const distance = levenshteinDistance(sw, clean); return (1 - (distance / Math.max(sw.length, clean.length))) >= 0.6; }); if (isMatched) { const el = document.getElementById(`pw-${i}`); if(el && !el.classList.contains('correct')) { el.classList.add('correct'); pidatoMatchCount++; } } }); }
-if(window.SpeechRecognition || window.webkitSpeechRecognition) { pidatoRecog = new (window.SpeechRecognition || window.webkitSpeechRecognition)(); pidatoRecog.lang = 'id-ID'; pidatoRecog.continuous = true; pidatoRecog.onresult = (e) => { let finalTrans = ''; for (let i = e.resultIndex; i < e.results.length; ++i) { if (e.results[i].isFinal) finalTrans += e.results[i][0].transcript + ' '; } if (finalTrans) evaluatePidato(finalTrans); }; pidatoRecog.onerror = (event) => { if(event.error === 'not-allowed') { alert("Akses mikrofon ditolak."); if(State.media.isRecording) togglePidato(); } }; }
-function togglePidato() { if(!pidatoRecog) return alert("Browser tidak mendukung mic."); const btn = document.getElementById('pid-btn'); if(State.media.isRecording) { pidatoRecog.stop(); State.media.isRecording = false; if(btn) { btn.innerText = "🎤 Mulai Baca"; btn.classList.replace('btn-danger', 'btn-primary'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.remove('active'); let wordCount = pidatoWords.length; let acc = wordCount > 0 ? Math.round((pidatoMatchCount / wordCount) * 100) : 0; State.scores.pidato = acc > 100 ? 100 : acc; saveScores(); const scoreEl = document.getElementById('p-score'); if(scoreEl) scoreEl.innerText = `Akurasi Pengucapan: ${State.scores.pidato}%`; } else { if(window.speechSynthesis) window.speechSynthesis.cancel(); stopPidatoTTS(); State.media.isRecording = true; if(btn) { btn.innerText = "⏹️ Hentikan"; btn.classList.replace('btn-primary', 'btn-danger'); } const rec = document.getElementById('pid-rec'); if(rec) rec.classList.add('active'); pidatoRecog.start(); } }
+function evaluatePidato(trans) {
+    const spoken = trans.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g, "").split(/\s+/).filter(w => w.length > 0);
+    pidatoWords.forEach((rw, i) => {
+        const clean = rw.toLowerCase().replace(/[.,\/#!$%^&\*;:{}=\-_`~()]/g, "");
+        if (clean.length < 3) return;
+        const matched = spoken.some(sw => {
+            if (sw.length < 3) return false;
+            if (sw.includes(clean) || clean.includes(sw)) return true;
+            return wordSimilarity(sw, clean) >= 0.6;
+        });
+        if (matched) {
+            const el = document.getElementById(`pw-${i}`);
+            if (el && !el.classList.contains('correct')) {
+                el.classList.add('correct');
+                pidatoMatchCount++;
+            }
+        }
+    });
+}
 
-// --- RAPAT (DRAMA DENGAN AVATAR) ---
+if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+    pidatoRecog = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    pidatoRecog.lang = 'id-ID'; pidatoRecog.continuous = true;
+    pidatoRecog.onresult = (e) => {
+        let finalTrans = '';
+        for (let i = e.resultIndex; i < e.results.length; ++i) {
+            if (e.results[i].isFinal) finalTrans += e.results[i][0].transcript + ' ';
+        }
+        if (finalTrans) evaluatePidato(finalTrans);
+    };
+    pidatoRecog.onerror = (event) => {
+        if (event.error === 'not-allowed') {
+            toast("Akses mikrofon ditolak.", "error");
+            if (State.media.isRecording) togglePidato();
+        }
+    };
+}
+
+function togglePidato() {
+    if (!pidatoRecog) return toast("Browser tidak mendukung mikrofon.", "error");
+    const btn = document.getElementById('pid-btn');
+    if (State.media.isRecording) {
+        pidatoRecog.stop();
+        State.media.isRecording = false;
+        if (btn) { btn.innerText = "🎤 Mulai Baca"; btn.classList.replace('btn-danger', 'btn-primary'); }
+        document.getElementById('pid-rec')?.classList.remove('active');
+        const total = pidatoWords.length;
+        const acc = total > 0 ? Math.round((pidatoMatchCount / total) * 100) : 0;
+        State.scores.pidato = Math.min(100, acc);
+        saveScores();
+        const scoreEl = document.getElementById('p-score');
+        if (scoreEl) scoreEl.innerText = `Akurasi Pengucapan: ${State.scores.pidato}%`;
+    } else {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        stopPidatoTTS();
+        State.media.isRecording = true;
+        if (btn) { btn.innerText = "⏹️ Hentikan"; btn.classList.replace('btn-primary', 'btn-danger'); }
+        document.getElementById('pid-rec')?.classList.add('active');
+        pidatoRecog.start();
+    }
+}
+
+// ==========================================
+// 12. RAPAT (DRAMA)
+// ==========================================
 const AllDramaScripts = [
     [
         { speaker: "Sistem", text: "Warga sudah berkumpul. Suasana gaduh karena saling berdebat.", choices: [{ text: "Membentak warga.", effect: -30, feedback: "Warga tersinggung." }, { text: "Mengucap salam dan meminta perhatian dengan tenang.", effect: 10, feedback: "Warga menghargai sikap Anda." }] },
@@ -1277,92 +1576,220 @@ const AllDramaScripts = [
         { speaker: "Sistem", text: "Anda menemukan bahwa tanah tersebut memang berstatus Tanah Kasultanan (Duluwung) yang tidak memiliki hak milik perorangan.", choices: [{ text: "Membiarkan warga menjualnya diam-diam.", effect: -50, feedback: "Anda melanggar hukum dan bisa dipidana. Rapat bubar." }, { text: "Mengedukasi warga tentang Hukum Pertanahan DIY dan melaporkannya ke Panewu.", effect: 30, feedback: "Warga A akhirnya mengerti dan membatalkan niatnya. Rapat kondusif." }] }
     ]
 ];
-function startRapatDrama(scenarioIndex) { State.rapatDrama = { active: true, scenario: scenarioIndex, step: 0, peace: 100, timer: null, typeTimer: null, nextTimer: null, history: [] }; router(); }
-function getAvatar(speaker) { const avatars = { "Sistem": "🤖", "Pak RT 01": "👨‍💼", "Pak RT 02": "👨‍🌾", "Warga Vokal": "😡", "Warga Mampu": "🕴️", "Warga Miskin": "🧑‍🦱", "Warga Baru": "🧑‍💼", "Warga Lama": "👴", "Warga A": "👨‍🦳", "Warga B": "👵" }; return avatars[speaker] || "👤"; }
-function speakDramaLine(text, speaker) { if (!('speechSynthesis' in window)) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text); utterance.lang = 'id-ID'; const voices = State.media.ttsVoices; let selectedVoice = null; if (voices.length > 0) { if (speaker.includes("Warga") || speaker.includes("Ibu")) { selectedVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('gadis')); utterance.pitch = 1.2; utterance.rate = 1.1; } else if (speaker.includes("Pak RT") || speaker.includes("Lurah") || speaker.includes("Dukuh")) { selectedVoice = voices.find(v => v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('ardi')); utterance.pitch = 0.8; utterance.rate = 0.95; } else { selectedVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('gadis')); utterance.pitch = 1.0; utterance.rate = 0.9; } } if (selectedVoice) utterance.voice = selectedVoice; utterance.text = `${speaker} berkata: ${text}`; setTimeout(() => { window.speechSynthesis.speak(utterance); }, 250); }
-function renderDramaStep() { if(State.rapatDrama.timer) clearInterval(State.rapatDrama.timer); if(State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer); if(State.rapatDrama.nextTimer) clearTimeout(State.rapatDrama.nextTimer); if (State.rapatDrama.peace <= 0) { endRapatDrama(false, "Bar Ketenangan habis (0%). Warga ricuh dan rapat dibubarkan paksa."); return; } const currentScript = AllDramaScripts[State.rapatDrama.scenario]; if (State.rapatDrama.step >= currentScript.length) { endRapatDrama(true, "Rapat berjalan lancar. Anda berhasil memimpin dengan bijaksana!"); return; } const scene = currentScript[State.rapatDrama.step]; const dialogueEl = document.getElementById('drama-dialogue'); const choicesEl = document.getElementById('drama-choices'); if(!dialogueEl || !choicesEl) return; speakDramaLine(scene.text, scene.speaker); const avatarEmoji = getAvatar(scene.speaker); dialogueEl.innerHTML = `<div style="display: flex; gap: 20px; align-items: flex-start;"><div style="width: 70px; height: 70px; border-radius: 50%; background: #334155; display: flex; align-items: center; justify-content: center; font-size: 40px; flex-shrink: 0; border: 3px solid var(--primary); box-shadow: 0 4px 10px rgba(0,0,0,0.3);">${avatarEmoji}</div><div style="flex: 1;"><span class="speaker-name">${scene.speaker}</span><span id="typing-text" style="line-height: 1.7; display: block; margin-top: 10px;"></span></div></div>`; choicesEl.innerHTML = ''; let i = 0; const textToType = `"${scene.text}"`; function typeWriter() { if (!State.rapatDrama.active) return; const el = document.getElementById('typing-text'); if (!el) return; if (i < textToType.length) { el.innerHTML += textToType.charAt(i); i++; State.rapatDrama.typeTimer = setTimeout(typeWriter, 20); } else { showDramaChoices(scene); } } typeWriter(); }
-function showDramaChoices(scene) { const choicesContainer = document.getElementById('drama-choices'); if (!choicesContainer) return; choicesContainer.innerHTML = scene.choices.map((c, i) => `<button class="btn btn-block" style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); text-align:left; justify-content:flex-start; padding:1.25rem; transition: var(--transition);" onmouseover="this.style.background='rgba(255,255,255,0.15)'" onmouseout="this.style.background='rgba(255,255,255,0.05)'" onclick="makeChoice(${i})"><span style="color:var(--primary); font-weight:800; margin-right:15px;">PILIHAN ${i+1}</span> ${c.text}</button>`).join(''); let timeLeft = 45; const timerEl = document.getElementById('drama-timer'); if (timerEl) timerEl.innerText = timeLeft; State.rapatDrama.timer = setInterval(() => { if (!State.rapatDrama.active) { clearInterval(State.rapatDrama.timer); return; } timeLeft--; if (timerEl) { timerEl.innerText = timeLeft; if(timeLeft <= 10) timerEl.style.color = 'var(--danger)'; else timerEl.style.color = 'white'; } if (timeLeft <= 0) { clearInterval(State.rapatDrama.timer); makeChoice(-1); } }, 1000); }
-function makeChoice(index) { if(!State.rapatDrama.active) return; if(State.rapatDrama.timer) clearInterval(State.rapatDrama.timer); if(State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer); if(window.speechSynthesis) window.speechSynthesis.cancel(); const currentScript = AllDramaScripts[State.rapatDrama.scenario]; const scene = currentScript[State.rapatDrama.step]; const container = document.getElementById('drama-choices'); if (container) container.innerHTML = ''; let selectedChoice; if (index === -1) selectedChoice = { text: "(Waktu habis. Anda terdiam.)", effect: -20, feedback: "Warga menganggap Anda tidak becus memimpin rapat." }; else selectedChoice = scene.choices[index]; State.rapatDrama.peace += selectedChoice.effect; if (State.rapatDrama.peace > 100) State.rapatDrama.peace = 100; const peaceBar = document.getElementById('peace-bar'); const peaceVal = document.getElementById('peace-val'); if (peaceVal) peaceVal.innerText = State.rapatDrama.peace; if (peaceBar) { peaceBar.style.width = `${State.rapatDrama.peace}%`; peaceBar.style.background = State.rapatDrama.peace > 50 ? 'var(--success)' : 'var(--danger)'; } const dialogueEl = document.getElementById('drama-dialogue'); if (dialogueEl) { const feedbackColor = selectedChoice.effect > 0 ? 'var(--success)' : 'var(--danger)'; dialogueEl.innerHTML += `<div style="display: flex; gap: 15px; align-items: flex-start; margin-top: 30px; animation: fadeIn 0.5s;"><div style="width: 50px; height: 50px; border-radius: 50%; background: #334155; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; border: 2px solid ${feedbackColor}; box-shadow: 0 0 10px ${feedbackColor};">📝</div><div class="chat-bubble" style="border-left-color: ${feedbackColor}; margin-top: 0; padding: 1.25rem;"><em style="font-size: 1.1rem;">${selectedChoice.feedback}</em></div></div>`; } if (State.rapatDrama.peace <= 0) { State.rapatDrama.nextTimer = setTimeout(() => { endRapatDrama(false, "Bar Ketenangan habis (0%). Warga ricuh dan rapat dibubarkan paksa."); }, 2500); } else { State.rapatDrama.nextTimer = setTimeout(() => { State.rapatDrama.step++; renderDramaStep(); }, 2500); } }
-function endRapatDrama(isWin, message) { State.rapatDrama.active = false; if(State.rapatDrama.timer) clearInterval(State.rapatDrama.timer); if(State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer); if(State.rapatDrama.nextTimer) clearTimeout(State.rapatDrama.nextTimer); if(window.speechSynthesis) window.speechSynthesis.cancel(); if(isWin) State.scores.rapat = Math.max(State.rapatDrama.peace, 70); else State.scores.rapat = State.rapatDrama.peace; saveScores(); const container = document.getElementById('view-container'); if(!container) return; container.innerHTML = `<div class="text-center" style="padding: 4rem 0; animation: fadeIn 0.5s;"><h1 style="color: ${isWin ? 'var(--success)' : 'var(--danger)'}; font-size: 3rem; font-weight: 800; margin-bottom: 1rem;">${isWin ? 'RAPAT SUKSES!' : 'RAPAT GAGAL!'}</h1><div style="font-size: 5rem; margin-bottom: 1.5rem;">${isWin ? '🏆' : '🔥'}</div><h3 style="font-size: 1.25rem; font-weight: 500; color: var(--text-main); margin-bottom: 1rem;">${message}</h3><h2 style="font-size: 2rem; font-weight: 700; color: var(--primary); margin-bottom: 2rem;">Skor Akhir Ketenangan: ${State.scores.rapat}%</h2><div style="max-width: 400px; margin: 0 auto;"><button class="btn btn-block" onclick="window.location.hash='#/rapat'">Coba Skenario Lain</button><button class="btn btn-block btn-warning" onclick="window.location.hash='#/dashboard'">Ke Dashboard</button></div></div>`; }
 
-// --- UTILITIES ---
-function runTimer(elementId, duration, onEnd) { let timer = duration; const el = document.getElementById(elementId); if(!el) return; const interval = setInterval(() => { let m = parseInt(timer / 60, 10); let s = parseInt(timer % 60, 10); m = m < 10 ? "0" + m : m; s = s < 10 ? "0" + s : s; el.innerHTML = `⏱️ Sisa Waktu: ${m}:${s}`; if (--timer < 0) { clearInterval(interval); el.innerHTML = "Waktu Habis!"; el.style.background = 'var(--danger)'; el.style.color = 'white'; onEnd(); } }, 1000); if(elementId === 'kuis-timer') State.quiz.timer = interval; else if(elementId === 'office-timer') State.office.wordTimer = interval; else if(elementId === 'excel-timer') State.office.excelTimer = interval; }
-
-function updateDashboardView() { 
-    const allMods = [
-        {k:'kuis', n:'Kuis', icon:'📝'}, 
-        {k:'psikologi', n:'Psikologi', icon:'🧠'}, 
-        {k:'wawancara', n:'Wawancara', icon:'🗣️'},
-        {k:'word', n:'Ketik Word', icon:'⌨️'}, 
-        {k:'excel', n:'Tabel Excel', icon:'📊'}, 
-        {k:'presentasi', n:'Presentasi PPT', icon:'📽️'}, 
-        {k:'pidato', n:'Pidato Jawa', icon:'🎤'}, 
-        {k:'rapat', n:'Simulasi Rapat', icon:'👥'}
-    ]; 
-
-    let html = '';
-    let selesaiCount = 0;
-    allMods.forEach(m => { 
-        const val = State.scores[m.k]; 
-        if(val !== null) selesaiCount++;
-        const stat = val === null ? 'Belum' : (val >= 70 ? 'Lulus' : 'Remedial'); 
-        const color = val === null ? 'var(--secondary)' : (val >= 70 ? 'var(--success)' : 'var(--danger)'); 
-        const bg = val === null ? 'var(--bg-main)' : (val >= 70 ? 'var(--success-light)' : 'var(--danger-light)');
-        html += `<div class="card"><h4>${m.icon} ${m.n}</h4><div class="card-val">${val !== null ? val : '-'}</div><small style="color:${color}; background: ${bg};">${stat}</small></div>`; 
-    }); 
-    const cardsEl = document.getElementById('dash-cards');
-    if(cardsEl) cardsEl.innerHTML = html; 
-    
-    const required = ['kuis', 'word', 'excel', 'presentasi', 'pidato', 'rapat', 'wawancara', 'psikologi'];
-    const isComplete = required.every(k => State.scores[k] !== null && State.scores[k] !== undefined);
-
-    let totalScore = 0;
-    if (isComplete) {
-        const rataKomputer = (State.scores.word + State.scores.excel + State.scores.presentasi) / 3;
-        const rataSosial = (State.scores.pidato + State.scores.rapat) / 2; 
-        totalScore = (State.scores.kuis * 0.3) + (State.scores.wawancara * 0.1) + (State.scores.psikologi * 0.2) + (rataKomputer * 0.2) + (rataSosial * 0.2);
+function renderRapat() {
+    if (!State.rapatDrama.active) {
+        return `
+            <div class="text-center" style="margin-bottom: 2rem;">
+                <h2 style="font-weight: 800; font-size: 2rem; margin-bottom: 0.5rem;">Simulasi Memimpin Rapat</h2>
+                <p style="color: var(--text-muted);">Uji naluri kepemimpinan Anda dalam menyelesaikan konflik warga.</p>
+            </div>
+            <div style="display: grid; gap: 1rem; max-width: 600px; margin: 0 auto;">
+                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--primary);" onclick="startRapatDrama(0)">
+                    <h3 style="color: var(--primary); margin-bottom: 0.5rem; font-size: 1.2rem;">1. Pembangunan vs Sampah</h3>
+                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga RT 01 menuntut lapangan voli, RT 02 menuntut penanganan sampah. Dana terbatas.</p>
+                </div>
+                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--warning);" onclick="startRapatDrama(1)">
+                    <h3 style="color: var(--warning); margin-bottom: 0.5rem; font-size: 1.2rem;">2. Musyawarah Bantuan Sosial</h3>
+                    <p style="color: var(--text-muted); font-size: 0.95rem;">Data penerima Bansos menjadi sorotan. Warga mampu minta jatah, warga miskin belum terdata.</p>
+                </div>
+                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--success);" onclick="startRapatDrama(2)">
+                    <h3 style="color: var(--success); margin-bottom: 0.5rem; font-size: 1.2rem;">3. Iuran Keamanan & Ronda</h3>
+                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga baru menolak iuran karena merasa aman, warga lama protes karena merasa tidak adil.</p>
+                </div>
+                <div class="card" style="text-align:left; cursor:pointer; padding: 1.5rem; border-left: 4px solid var(--danger);" onclick="startRapatDrama(3)">
+                    <h3 style="color: var(--danger); margin-bottom: 0.5rem; font-size: 1.2rem;">4. Sengketa Tanah Kasultanan</h3>
+                    <p style="color: var(--text-muted); font-size: 0.95rem;">Warga mengklaim tanah miliknya dan ingin menjualnya, padahal status tanah adalah Kasultanan/Duluwung.</p>
+                </div>
+            </div>`;
     }
-    
-    const finalEl = document.getElementById('dash-final');
-    const statusEl = document.getElementById('dash-status');
-    if(!finalEl || !statusEl) return;
+    return `
+        <div class="peace-container">
+            <div style="font-weight: 800; font-size: 1rem; color: var(--text-main); white-space: nowrap;">❤️ KETENANGAN: <span id="peace-val" style="color: var(--success); font-size: 1.2rem;">${State.rapatDrama.peace}</span>%</div>
+            <div class="peace-bar-bg"><div class="peace-bar-fill" id="peace-bar" style="width:${State.rapatDrama.peace}%; background:${State.rapatDrama.peace > 50 ? 'var(--success)' : 'var(--danger)'};"></div></div>
+            <div class="peace-timer">⏱️ <span id="drama-timer">45</span>s</div>
+        </div>
+        <div class="drama-layout">
+            <div id="drama-dialogue" class="dialogue-text"></div>
+            <div id="drama-choices" style="margin-top: 2rem; display: flex; flex-direction: column; gap: 1rem;"></div>
+        </div>`;
+}
 
-    if (isComplete) {
-        const roundedFinal = Math.round(totalScore);
-        finalEl.innerText = roundedFinal;
-        if(roundedFinal >= 70) {
-            statusEl.innerText = "STATUS: LULUS";
-            statusEl.style.color = "#a7f3d0";
-        } else {
-            statusEl.innerText = "STATUS: BELUM LULUS";
-            statusEl.style.color = "#fca5a5";
-        }
+function startRapatDrama(i) {
+    State.rapatDrama = { active: true, scenario: i, step: 0, peace: 100, timer: null, typeTimer: null, nextTimer: null, history: [] };
+    router();
+}
+
+function getAvatar(speaker) {
+    const a = { "Sistem": "🤖", "Pak RT 01": "👨‍💼", "Pak RT 02": "👨‍🌾", "Warga Vokal": "😡", "Warga Mampu": "🕴️", "Warga Miskin": "🧑‍🦱", "Warga Baru": "🧑‍💼", "Warga Lama": "👴", "Warga A": "👨‍🦳", "Warga B": "👵" };
+    return a[speaker] || "👤";
+}
+
+function speakDramaLine(text, speaker) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'id-ID';
+    const voices = State.media.ttsVoices;
+    let v = null;
+    if (voices.length > 0) {
+        if (speaker.includes("Warga") || speaker.includes("Ibu")) { v = voices.find(x => x.name.toLowerCase().includes('female') || x.name.toLowerCase().includes('gadis')); u.pitch = 1.2; u.rate = 1.1; }
+        else if (speaker.includes("Pak RT") || speaker.includes("Lurah") || speaker.includes("Dukuh")) { v = voices.find(x => x.name.toLowerCase().includes('male') || x.name.toLowerCase().includes('ardi')); u.pitch = 0.8; u.rate = 0.95; }
+        else { v = voices.find(x => x.name.toLowerCase().includes('female') || x.name.toLowerCase().includes('gadis')); u.pitch = 1.0; u.rate = 0.9; }
+    }
+    if (v) u.voice = v;
+    u.text = `${speaker} berkata: ${text}`;
+    setTimeout(() => window.speechSynthesis.speak(u), 250);
+}
+
+function renderDramaStep() {
+    if (State.rapatDrama.timer) clearInterval(State.rapatDrama.timer);
+    if (State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer);
+    if (State.rapatDrama.nextTimer) clearTimeout(State.rapatDrama.nextTimer);
+
+    if (State.rapatDrama.peace <= 0) { endRapatDrama(false, "Bar Ketenangan habis (0%). Warga ricuh dan rapat dibubarkan paksa."); return; }
+    const script = AllDramaScripts[State.rapatDrama.scenario];
+    if (State.rapatDrama.step >= script.length) { endRapatDrama(true, "Rapat berjalan lancar. Anda berhasil memimpin dengan bijaksana!"); return; }
+
+    const scene = script[State.rapatDrama.step];
+    const dialogueEl = document.getElementById('drama-dialogue');
+    const choicesEl = document.getElementById('drama-choices');
+    if (!dialogueEl || !choicesEl) return;
+
+    speakDramaLine(scene.text, scene.speaker);
+    dialogueEl.innerHTML = `<div style="display: flex; gap: 20px; align-items: flex-start;">
+        <div style="width: 70px; height: 70px; border-radius: 50%; background: #334155; display: flex; align-items: center; justify-content: center; font-size: 40px; flex-shrink: 0; border: 3px solid var(--primary); box-shadow: 0 4px 10px rgba(0,0,0,0.3);">${getAvatar(scene.speaker)}</div>
+        <div style="flex: 1;"><span class="speaker-name">${scene.speaker}</span><span id="typing-text" style="line-height: 1.7; display: block; margin-top: 10px;"></span></div>
+    </div>`;
+    choicesEl.innerHTML = '';
+
+    let i = 0;
+    const textToType = `"${scene.text}"`;
+    function typeWriter() {
+        if (!State.rapatDrama.active) return;
+        const el = document.getElementById('typing-text');
+        if (!el) return;
+        if (i < textToType.length) { el.innerHTML += textToType.charAt(i); i++; State.rapatDrama.typeTimer = setTimeout(typeWriter, 20); }
+        else showDramaChoices(scene);
+    }
+    typeWriter();
+}
+
+function showDramaChoices(scene) {
+    const container = document.getElementById('drama-choices');
+    if (!container) return;
+    container.innerHTML = scene.choices.map((c, i) =>
+        `<button class="btn btn-block" style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); text-align:left; justify-content:flex-start; padding:1.25rem; transition: var(--transition);" onmouseover="this.style.background='rgba(255,255,255,0.15)'" onmouseout="this.style.background='rgba(255,255,255,0.05)'" onclick="makeChoice(${i})">
+            <span style="color:var(--primary); font-weight:800; margin-right:15px;">PILIHAN ${i + 1}</span> ${c.text}
+        </button>`).join('');
+    let timeLeft = 45;
+    const timerEl = document.getElementById('drama-timer');
+    if (timerEl) timerEl.innerText = timeLeft;
+    State.rapatDrama.timer = setInterval(() => {
+        if (!State.rapatDrama.active) { clearInterval(State.rapatDrama.timer); return; }
+        timeLeft--;
+        if (timerEl) { timerEl.innerText = timeLeft; timerEl.style.color = timeLeft <= 10 ? 'var(--danger)' : 'white'; }
+        if (timeLeft <= 0) { clearInterval(State.rapatDrama.timer); makeChoice(-1); }
+    }, 1000);
+}
+
+function makeChoice(index) {
+    if (!State.rapatDrama.active) return;
+    if (State.rapatDrama.timer) clearInterval(State.rapatDrama.timer);
+    if (State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer);
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+    const scene = AllDramaScripts[State.rapatDrama.scenario][State.rapatDrama.step];
+    const container = document.getElementById('drama-choices');
+    if (container) container.innerHTML = '';
+
+    const choice = index === -1
+        ? { text: "(Waktu habis. Anda terdiam.)", effect: -20, feedback: "Warga menganggap Anda tidak becus memimpin rapat." }
+        : scene.choices[index];
+
+    State.rapatDrama.peace = Math.min(100, State.rapatDrama.peace + choice.effect);
+    const bar = document.getElementById('peace-bar');
+    const val = document.getElementById('peace-val');
+    if (val) val.innerText = State.rapatDrama.peace;
+    if (bar) {
+        bar.style.width = `${State.rapatDrama.peace}%`;
+        bar.style.background = State.rapatDrama.peace > 50 ? 'var(--success)' : 'var(--danger)';
+    }
+
+    const dialogueEl = document.getElementById('drama-dialogue');
+    if (dialogueEl) {
+        const color = choice.effect > 0 ? 'var(--success)' : 'var(--danger)';
+        dialogueEl.innerHTML += `<div style="display: flex; gap: 15px; align-items: flex-start; margin-top: 30px; animation: fadeIn 0.5s;">
+            <div style="width: 50px; height: 50px; border-radius: 50%; background: #334155; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; border: 2px solid ${color}; box-shadow: 0 0 10px ${color};">📝</div>
+            <div class="chat-bubble" style="border-left-color: ${color}; margin-top: 0; padding: 1.25rem;"><em style="font-size: 1.1rem;">${choice.feedback}</em></div>
+        </div>`;
+    }
+
+    if (State.rapatDrama.peace <= 0) {
+        State.rapatDrama.nextTimer = setTimeout(() => endRapatDrama(false, "Bar Ketenangan habis (0%). Warga ricuh dan rapat dibubarkan paksa."), 2500);
     } else {
-        finalEl.innerText = "-";
-        statusEl.innerText = `MENUNGGU PENYELESAIAN (${selesaiCount}/8 Modul Selesai)`;
-        statusEl.style.color = "white";
+        State.rapatDrama.nextTimer = setTimeout(() => { State.rapatDrama.step++; renderDramaStep(); }, 2500);
     }
 }
 
-async function syncToServer(btn) { 
+function endRapatDrama(isWin, message) {
+    State.rapatDrama.active = false;
+    if (State.rapatDrama.timer) clearInterval(State.rapatDrama.timer);
+    if (State.rapatDrama.typeTimer) clearTimeout(State.rapatDrama.typeTimer);
+    if (State.rapatDrama.nextTimer) clearTimeout(State.rapatDrama.nextTimer);
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+    State.scores.rapat = isWin ? Math.max(State.rapatDrama.peace, 70) : State.rapatDrama.peace;
+    saveScores();
+
+    const container = document.getElementById('view-container');
+    if (!container) return;
+    container.innerHTML = `
+        <div class="text-center" style="padding: 4rem 0; animation: fadeIn 0.5s;">
+            <h1 style="color: ${isWin ? 'var(--success)' : 'var(--danger)'}; font-size: 3rem; font-weight: 800; margin-bottom: 1rem;">${isWin ? 'RAPAT SUKSES!' : 'RAPAT GAGAL!'}</h1>
+            <div style="font-size: 5rem; margin-bottom: 1.5rem;">${isWin ? '🏆' : '🔥'}</div>
+            <h3 style="font-size: 1.25rem; font-weight: 500; color: var(--text-main); margin-bottom: 1rem;">${message}</h3>
+            <h2 style="font-size: 2rem; font-weight: 700; color: var(--primary); margin-bottom: 2rem;">Skor Akhir Ketenangan: ${State.scores.rapat}%</h2>
+            <div style="max-width: 400px; margin: 0 auto;">
+                <button class="btn btn-block" onclick="window.location.hash='#/rapat'">Coba Skenario Lain</button>
+                <button class="btn btn-block btn-warning" onclick="window.location.hash='#/dashboard'">Ke Dashboard</button>
+            </div>
+        </div>`;
+}
+
+// ==========================================
+// 13. SYNC
+// ==========================================
+async function syncToServer(btn) {
     const nameEl = document.getElementById('p-name');
-    if(!nameEl) return;
-    const name = nameEl.value; 
-    if(!name) return alert("Masukkan nama Anda!"); 
-    btn.innerText = "⏳ Mengirim..."; btn.disabled = true; 
-    try { 
-        const payload = { 
-            nama: name, kuis: State.scores.kuis || 0, word: State.scores.word || 0, 
-            excel: State.scores.excel || 0, presentasi: State.scores.presentasi || 0, 
-            pidato: State.scores.pidato || 0, rapat: State.scores.rapat || 0,
-            wawancara: State.scores.wawancara || 0, psikologi: State.scores.psikologi || 0
-        }; 
-        await apiSubmitScores(payload); 
-        alert("✅ Data berhasil dikirim ke Spreadsheet!"); 
-    } catch(e) { 
-        alert(`❌ Gagal: ${e.message}`); 
-    } 
-    btn.innerText = "🚀 Kirim Nilai ke Server"; btn.disabled = false; 
+    if (!nameEl) return;
+    const name = nameEl.value.trim();
+    if (!name) return toast("Masukkan nama Anda terlebih dahulu.", "warning");
+
+    const original = btn.innerText;
+    btn.innerText = "⏳ Mengirim & Verifikasi..."; btn.disabled = true;
+
+    const payload = {
+        nama: name,
+        kuis: State.scores.kuis || 0,
+        word: State.scores.word || 0,
+        excel: State.scores.excel || 0,
+        presentasi: State.scores.presentasi || 0,
+        pidato: State.scores.pidato || 0,
+        rapat: State.scores.rapat || 0,
+        wawancara: State.scores.wawancara || 0,
+        psikologi: State.scores.psikologi || 0
+    };
+
+    try {
+        await apiSubmitScores(payload);
+        toast("Data berhasil dikirim dan terverifikasi di server!", "success");
+    } catch (e) {
+        toast(`Gagal: ${e.message}`, "error");
+    } finally {
+        btn.innerText = original;
+        btn.disabled = false;
+    }
 }
 
 window.onload = () => { initApp(); };
