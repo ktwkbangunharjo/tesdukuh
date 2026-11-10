@@ -1,14 +1,18 @@
 /**
  * ============================================================
  * BACKEND API — SISTEM SELEKSI CALON DUKUH
- * File: code.gs (Full Fixed v3)
- * 
- * Endpoint:
- *   GET  ?action=getQuestions   → soal kuis (sanitasi kunci)
- *   GET  ?action=getPidato      → teks pidato Jawa
- *   GET  ?action=verify&id=xxx  → verifikasi submission
- *   GET  ?action=ping           → health check
- *   POST (body JSON)            → simpan nilai (idempotent)
+ * File: code.gs (FULL v4 — With Auth)
+ *
+ * Endpoint GET:
+ *   ?action=getQuestions   → soal kuis
+ *   ?action=getPidato      → teks pidato Jawa
+ *   ?action=verify&id=xxx  → verifikasi submission
+ *   ?action=ping           → health check
+ *
+ * Endpoint POST (?action=...):
+ *   register, login, logout, checkSession,
+ *   listUsers, approveUser, rejectUser, deleteUser,
+ *   getResults, submitScore
  * ============================================================
  */
 
@@ -18,19 +22,23 @@
 const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID')
   || '19o52STHuFNWE9M48Y1JdZOtVR2cYROEyYwfuC14iotQ';
 
-const SHEET_SOAL   = 'BankSoal';
-const SHEET_HASIL  = 'HasilUjian';
-const SHEET_PIDATO = 'TeksPidato';
+const SHEET_SOAL     = 'BankSoal';
+const SHEET_HASIL    = 'HasilUjian';
+const SHEET_PIDATO   = 'TeksPidato';
+const SHEET_USERS    = 'Users';
+const SHEET_SESSIONS = 'Sessions';
 
 const USE_CACHE        = true;
-const CACHE_TTL_SEC    = 60;       // detik
-const VERIFY_SCAN_ROWS = 100;      // jumlah baris terakhir yang di-scan untuk verify
+const CACHE_TTL_SEC    = 60;
+const VERIFY_SCAN_ROWS = 200;
 const MAX_NAME_LENGTH  = 150;
+const SESSION_TTL_MS   = 1000 * 60 * 60 * 24; // 24 jam
 
-// Schema resmi (auto-migrasi jika kolom belum ada)
-const HEADERS_SOAL   = ['No','Kategori','Pertanyaan','OpsiA','OpsiB','OpsiC','OpsiD','Kunci','Pembahasan','Tipe','Paket'];
-const HEADERS_HASIL  = ['Timestamp','Nama Peserta','Kuis','Ketik Word','Tabel Excel','Presentasi PPT','Pidato Jawa','Simulasi Rapat','Wawancara','Psikologi','Paket','SubmissionId'];
-const HEADERS_PIDATO = ['ID','Judul','Teks_Lengkap'];
+const HEADERS_SOAL     = ['No','Kategori','Pertanyaan','OpsiA','OpsiB','OpsiC','OpsiD','Kunci','Pembahasan','Tipe','Paket'];
+const HEADERS_HASIL    = ['Timestamp','Nama Peserta','Kuis','Ketik Word','Tabel Excel','Presentasi PPT','Pidato Jawa','Simulasi Rapat','Wawancara','Psikologi','Paket','SubmissionId','UserID','Username'];
+const HEADERS_PIDATO   = ['ID','Judul','Teks_Lengkap'];
+const HEADERS_USERS    = ['ID','Username','PasswordHash','Salt','Nama','Email','Role','Status','CreatedAt','ApprovedAt','ApprovedBy','LastLogin'];
+const HEADERS_SESSIONS = ['Token','UserID','Username','ExpiresAt','CreatedAt'];
 
 // ============================================================
 // 2. HELPER — SPREADSHEET & SHEET
@@ -50,9 +58,7 @@ function getSpreadsheet() {
 
 function getOrCreateSheet(ss, sheetName, headers) {
   let sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName);
-  }
+  if (!sheet) sheet = ss.insertSheet(sheetName);
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers])
       .setFontWeight("bold").setBackground("#d9d9d9");
@@ -61,10 +67,6 @@ function getOrCreateSheet(ss, sheetName, headers) {
   return sheet;
 }
 
-/**
- * Pastikan semua expected headers ada. Yang belum ada ditambahkan di kolom kanan.
- * Data lama tidak disentuh.
- */
 function ensureHeaders(sheet, expectedHeaders) {
   const lastRow = sheet.getLastRow();
   const lastCol = Math.max(sheet.getLastColumn(), 1);
@@ -100,7 +102,7 @@ function readSheetAsObjects(sheet) {
   for (let i = 1; i < data.length; i++) {
     const obj = {};
     headers.forEach((h, j) => { obj[h] = data[i][j]; });
-    obj.__rowIndex = i + 1; // 1-based physical row
+    obj.__rowIndex = i + 1;
     rows.push(obj);
   }
   return { headers, rows };
@@ -114,9 +116,6 @@ function safeString(v) {
   return String(v);
 }
 
-/**
- * Parse kunci jawaban PG → index 0-3, atau null jika tidak bisa diresolusi.
- */
 function parseAnswerKey(raw, options) {
   if (raw === null || raw === undefined || raw === '') return null;
 
@@ -127,16 +126,9 @@ function parseAnswerKey(raw, options) {
 
   const str = String(raw).trim();
   if (!str) return null;
-
-  // Format "0"-"3"
   if (/^[0-3]$/.test(str)) return parseInt(str, 10);
+  if (/^[A-D][\.\)\s]*$/i.test(str)) return ['A','B','C','D'].indexOf(str.charAt(0).toUpperCase());
 
-  // Format "A", "B.", "C)", "D "
-  if (/^[A-D][\.\)\s]*$/i.test(str)) {
-    return ['A','B','C','D'].indexOf(str.charAt(0).toUpperCase());
-  }
-
-  // Format teks panjang → cocokkan dengan opsi
   const clean = s => String(s).toUpperCase()
     .replace(/^[A-D][\.\)\s]*/, '')
     .replace(/[^A-Z0-9]/g, '');
@@ -144,11 +136,9 @@ function parseAnswerKey(raw, options) {
   const cleanKey = clean(str);
   if (!cleanKey) return null;
 
-  // Exact match
   let idx = options.findIndex(o => clean(o) === cleanKey);
   if (idx !== -1) return idx;
 
-  // Contains match (fallback)
   idx = options.findIndex(o => {
     const co = clean(o);
     if (!co) return false;
@@ -175,43 +165,246 @@ function jsonResponse(obj) {
 }
 
 function errorResponse(msg, extra) {
-  return jsonResponse(Object.assign({ error: String(msg) }, extra || {}));
+  return jsonResponse(Object.assign({ result: 'error', error: String(msg) }, extra || {}));
 }
 
 // ============================================================
-// 5. GET ENDPOINTS
+// 5. HELPER — AUTH
 // ============================================================
-function doGet(e) {
-  if (!e || !e.parameter) {
-    return jsonResponse({ status: "API Aktif", ts: new Date().toISOString() });
-  }
-
-  const action = String(e.parameter.action || '').trim();
-
-  try {
-    if (action === 'getQuestions') return handleGetQuestions();
-    if (action === 'getPidato')    return handleGetPidato();
-    if (action === 'verify')       return handleVerify(e.parameter.id);
-    if (action === 'ping')         return handlePing();
-    return errorResponse("Action tidak dikenali: " + action);
-  } catch (err) {
-    console.error('[doGet] Error:', err);
-    return errorResponse(err.message || String(err));
-  }
+function hashPassword(password, salt) {
+  const raw = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    password + '|' + salt,
+    Utilities.Charset.UTF_8
+  );
+  return raw.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
 
-// ---------- 5.1 getQuestions ----------
+function generateSalt()  { return Utilities.getUuid().replace(/-/g, '').slice(0, 16); }
+function generateToken() { return Utilities.getUuid().replace(/-/g, '') + Date.now().toString(36); }
+
+function getUsersSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_USERS, HEADERS_USERS);
+  ensureHeaders(sheet, HEADERS_USERS);
+  return sheet;
+}
+
+function getSessionsSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_SESSIONS, HEADERS_SESSIONS);
+  ensureHeaders(sheet, HEADERS_SESSIONS);
+  return sheet;
+}
+
+function findUserByUsername(username) {
+  const uname = String(username).toLowerCase().trim();
+  const { rows } = readSheetAsObjects(getUsersSheet());
+  return rows.find(r => String(r['Username']).toLowerCase() === uname);
+}
+
+function findUserById(id) {
+  const { rows } = readSheetAsObjects(getUsersSheet());
+  return rows.find(r => String(r['ID']) === String(id));
+}
+
+function validateSession(token) {
+  if (!token) return null;
+  const { rows } = readSheetAsObjects(getSessionsSheet());
+  const now = Date.now();
+  const session = rows.find(r => String(r['Token']) === String(token) && Number(r['ExpiresAt']) > now);
+  if (!session) return null;
+  const user = findUserById(session['UserID']);
+  if (!user) return null;
+  if (String(user['Status']) !== 'approved') return null;
+  return user;
+}
+
+function requireAuth(token) {
+  const user = validateSession(token);
+  if (!user) throw new Error('Sesi tidak valid atau kedaluwarsa. Silakan login ulang.');
+  return user;
+}
+
+function requireAdmin(token) {
+  const user = requireAuth(token);
+  if (String(user['Role']) !== 'admin') throw new Error('Akses ditolak. Hanya admin.');
+  return user;
+}
+
+function publicUser(u) {
+  return {
+    id: u['ID'], username: u['Username'], nama: u['Nama'], email: u['Email'],
+    role: u['Role'], status: u['Status']
+  };
+}
+
+function setUserField(userId, fieldName, value) {
+  const sheet = getUsersSheet();
+  const { headers, rows } = readSheetAsObjects(sheet);
+  const u = rows.find(r => String(r['ID']) === String(userId));
+  if (!u) return false;
+  const col = headers.indexOf(fieldName);
+  if (col === -1) return false;
+  sheet.getRange(u.__rowIndex, col + 1).setValue(value);
+  return true;
+}
+
+// ============================================================
+// 6. HANDLER — AUTH
+// ============================================================
+function handleRegister(data) {
+  const username = String(data.username || '').trim().toLowerCase();
+  const password = String(data.password || '');
+  const nama = String(data.nama || '').trim();
+  const email = String(data.email || '').trim();
+
+  if (username.length < 3) throw new Error('Username minimal 3 karakter.');
+  if (!/^[a-z0-9_]+$/.test(username)) throw new Error('Username hanya huruf kecil, angka, underscore.');
+  if (password.length < 6) throw new Error('Password minimal 6 karakter.');
+  if (!nama) throw new Error('Nama lengkap wajib diisi.');
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Format email tidak valid.');
+  if (findUserByUsername(username)) throw new Error('Username sudah terpakai.');
+
+  const sheet = getUsersSheet();
+  const salt = generateSalt();
+  const id = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  sheet.appendRow([
+    id, username, hashPassword(password, salt), salt, nama, email,
+    'user', 'pending', new Date().toISOString(), '', '', ''
+  ]);
+
+  return { success: true, message: 'Pendaftaran berhasil. Menunggu persetujuan admin.' };
+}
+
+function handleLogin(data) {
+  const username = String(data.username || '').trim().toLowerCase();
+  const password = String(data.password || '');
+  if (!username || !password) throw new Error('Username dan password wajib diisi.');
+
+  const user = findUserByUsername(username);
+  if (!user) throw new Error('Username atau password salah.');
+
+  const expected = hashPassword(password, user['Salt']);
+  if (expected !== String(user['PasswordHash'])) throw new Error('Username atau password salah.');
+
+  const status = String(user['Status']);
+  if (status === 'pending')  throw new Error('Akun masih menunggu persetujuan admin.');
+  if (status === 'rejected') throw new Error('Akun ditolak oleh admin.');
+  if (status !== 'approved') throw new Error('Akun tidak aktif.');
+
+  const token = generateToken();
+  getSessionsSheet().appendRow([
+    token, user['ID'], user['Username'], Date.now() + SESSION_TTL_MS, new Date().toISOString()
+  ]);
+  setUserField(user['ID'], 'LastLogin', new Date().toISOString());
+
+  return { success: true, token, user: publicUser(user) };
+}
+
+function handleLogout(data) {
+  const token = String(data.token || '').trim();
+  if (!token) return { success: true };
+  const sheet = getSessionsSheet();
+  const { rows } = readSheetAsObjects(sheet);
+  const s = rows.find(r => String(r['Token']) === token);
+  if (s) sheet.deleteRow(s.__rowIndex);
+  return { success: true };
+}
+
+function handleCheckSession(token) {
+  const user = validateSession(token);
+  if (!user) return { success: false, valid: false };
+  return { success: true, valid: true, user: publicUser(user) };
+}
+
+// ============================================================
+// 7. HANDLER — ADMIN
+// ============================================================
+function handleListUsers(token) {
+  requireAdmin(token);
+  const { rows } = readSheetAsObjects(getUsersSheet());
+  return {
+    success: true,
+    users: rows.map(r => ({
+      id: r['ID'], username: r['Username'], nama: r['Nama'], email: r['Email'],
+      role: r['Role'], status: r['Status'],
+      createdAt: r['CreatedAt'], approvedAt: r['ApprovedAt'],
+      approvedBy: r['ApprovedBy'], lastLogin: r['LastLogin']
+    }))
+  };
+}
+
+function handleApproveUser(token, userId) {
+  const admin = requireAdmin(token);
+  if (!userId) throw new Error('User ID wajib.');
+  if (!findUserById(userId)) throw new Error('User tidak ditemukan.');
+  setUserField(userId, 'Status', 'approved');
+  setUserField(userId, 'ApprovedAt', new Date().toISOString());
+  setUserField(userId, 'ApprovedBy', admin['Username']);
+  return { success: true, message: 'User disetujui.' };
+}
+
+function handleRejectUser(token, userId) {
+  requireAdmin(token);
+  if (!userId) throw new Error('User ID wajib.');
+  if (!findUserById(userId)) throw new Error('User tidak ditemukan.');
+  setUserField(userId, 'Status', 'rejected');
+  return { success: true, message: 'User ditolak.' };
+}
+
+function handleDeleteUser(token, userId) {
+  const admin = requireAdmin(token);
+  if (String(admin['ID']) === String(userId)) throw new Error('Tidak bisa menghapus akun sendiri.');
+
+  const sheet = getUsersSheet();
+  const { rows } = readSheetAsObjects(sheet);
+  const u = rows.find(r => String(r['ID']) === String(userId));
+  if (!u) throw new Error('User tidak ditemukan.');
+  sheet.deleteRow(u.__rowIndex);
+
+  // Hapus sesi terkait
+  const sSheet = getSessionsSheet();
+  const { rows: sRows } = readSheetAsObjects(sSheet);
+  sRows.filter(s => String(s['UserID']) === String(userId))
+    .sort((a, b) => b.__rowIndex - a.__rowIndex)
+    .forEach(s => sSheet.deleteRow(s.__rowIndex));
+
+  return { success: true };
+}
+
+function handleGetResults(token) {
+  requireAdmin(token);
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_HASIL, HEADERS_HASIL);
+  ensureHeaders(sheet, HEADERS_HASIL);
+  const { rows } = readSheetAsObjects(sheet);
+  return {
+    success: true,
+    results: rows.map(r => ({
+      timestamp: r['Timestamp'], nama: r['Nama Peserta'],
+      kuis: r['Kuis'], word: r['Ketik Word'], excel: r['Tabel Excel'],
+      presentasi: r['Presentasi PPT'], pidato: r['Pidato Jawa'],
+      rapat: r['Simulasi Rapat'], wawancara: r['Wawancara'], psikologi: r['Psikologi'],
+      submissionId: r['SubmissionId'], userId: r['UserID'], username: r['Username']
+    }))
+  };
+}
+
+// ============================================================
+// 8. HANDLER — DATA (GET)
+// ============================================================
 function handleGetQuestions() {
   const cache = (USE_CACHE && typeof CacheService !== 'undefined')
     ? CacheService.getScriptCache()
     : null;
-  const cacheKey = 'bs_v3';
+  const cacheKey = 'bs_v4';
 
   if (cache) {
     try {
       const cached = cache.get(cacheKey);
       if (cached) return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
-    } catch (e) { /* cache read failure = non-fatal */ }
+    } catch (e) {}
   }
 
   const ss = getSpreadsheet();
@@ -222,13 +415,8 @@ function handleGetQuestions() {
   if (rows.length === 0) throw new Error("Sheet 'BankSoal' kosong (tidak ada data).");
 
   const idx = h => headers.indexOf(h);
-  const iTipe  = idx('Tipe');
-  const iKunci = idx('Kunci');
-  const iPemb  = idx('Pembahasan');
-  const iPaket = idx('Paket');
-  const iNo    = idx('No');
-  const iKat   = idx('Kategori');
-  const iQuest = idx('Pertanyaan');
+  const iTipe = idx('Tipe'), iKunci = idx('Kunci'), iPemb = idx('Pembahasan'),
+        iPaket = idx('Paket'), iNo = idx('No'), iKat = idx('Kategori');
 
   const questions = [];
   let skipped = 0;
@@ -239,60 +427,45 @@ function handleGetQuestions() {
 
     const tipe = (iTipe !== -1 ? safeString(row['Tipe']) : 'pg').trim().toLowerCase() || 'pg';
     const options = [
-      safeString(row['OpsiA']),
-      safeString(row['OpsiB']),
-      safeString(row['OpsiC']),
-      safeString(row['OpsiD'])
+      safeString(row['OpsiA']), safeString(row['OpsiB']),
+      safeString(row['OpsiC']), safeString(row['OpsiD'])
     ];
-
     const rawKey = iKunci !== -1 ? row['Kunci'] : '';
 
     let answer;
     if (tipe === 'uraian') {
       answer = safeString(rawKey).trim();
     } else {
-      // PG: wajib resolve jadi index 0-3
       if (options.filter(o => o.trim()).length < 2) { skipped++; return; }
       const parsed = parseAnswerKey(rawKey, options);
-      if (parsed === null) {
-        console.warn(`[getQuestions] Baris ${row.__rowIndex} ("${pertanyaan.slice(0,40)}...") kunci tidak bisa di-resolve. Skipped.`);
-        skipped++;
-        return;
-      }
+      if (parsed === null) { skipped++; return; }
       answer = parsed;
     }
 
     questions.push({
-      no:          iNo !== -1 && row['No'] !== '' ? row['No'] : (ri + 1),
-      category:    iKat !== -1 ? safeString(row['Kategori']).trim() || 'Umum' : 'Umum',
-      question:    pertanyaan,
-      options,
-      answer,
+      no: iNo !== -1 && row['No'] !== '' ? row['No'] : (ri + 1),
+      category: iKat !== -1 ? safeString(row['Kategori']).trim() || 'Umum' : 'Umum',
+      question: pertanyaan, options, answer,
       explanation: iPemb !== -1 ? safeString(row['Pembahasan']).trim() : '',
       tipe,
-      paket:       iPaket !== -1 ? safeString(row['Paket']).trim() : ''
+      paket: iPaket !== -1 ? safeString(row['Paket']).trim() : ''
     });
   });
 
   if (questions.length === 0) {
-    throw new Error(`Tidak ada soal valid di 'BankSoal' (${skipped} baris di-skip karena format tidak valid).`);
+    throw new Error(`Tidak ada soal valid di 'BankSoal' (${skipped} baris di-skip).`);
   }
 
   const payload = JSON.stringify(questions);
-
-  if (cache) {
-    try { cache.put(cacheKey, payload, CACHE_TTL_SEC); } catch (e) {}
-  }
-
+  if (cache) { try { cache.put(cacheKey, payload, CACHE_TTL_SEC); } catch (e) {} }
   return ContentService.createTextOutput(payload).setMimeType(ContentService.MimeType.JSON);
 }
 
-// ---------- 5.2 getPidato ----------
 function handleGetPidato() {
   const cache = (USE_CACHE && typeof CacheService !== 'undefined')
     ? CacheService.getScriptCache()
     : null;
-  const cacheKey = 'pd_v3';
+  const cacheKey = 'pd_v4';
 
   if (cache) {
     try {
@@ -322,7 +495,6 @@ function handleGetPidato() {
   return ContentService.createTextOutput(payload).setMimeType(ContentService.MimeType.JSON);
 }
 
-// ---------- 5.3 verify ----------
 function handleVerify(submissionId) {
   const id = safeString(submissionId).trim();
   if (!id) return jsonResponse({ success: false, error: 'Parameter id wajib.' });
@@ -338,7 +510,7 @@ function handleVerify(submissionId) {
   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
     .map(h => String(h).trim());
   const idxId = headers.indexOf('SubmissionId');
-  if (idxId === -1) return jsonResponse({ success: false, error: 'Kolom SubmissionId tidak ditemukan. Jalankan ensureHeaders.' });
+  if (idxId === -1) return jsonResponse({ success: false, error: 'Kolom SubmissionId tidak ditemukan.' });
 
   const scanFrom = Math.max(2, lastRow - (VERIFY_SCAN_ROWS - 1));
   const numRows  = lastRow - scanFrom + 1;
@@ -346,7 +518,6 @@ function handleVerify(submissionId) {
 
   const data = sheet.getRange(scanFrom, 1, numRows, lastCol).getValues();
 
-  // Scan dari bawah (kemungkinan besar submission terbaru)
   for (let i = data.length - 1; i >= 0; i--) {
     if (safeString(data[i][idxId]).trim() === id) {
       return jsonResponse({ success: true, row: scanFrom + i });
@@ -355,110 +526,215 @@ function handleVerify(submissionId) {
   return jsonResponse({ success: false, reason: 'not_found' });
 }
 
-// ---------- 5.4 ping ----------
 function handlePing() {
   return jsonResponse({ success: true, ts: Date.now(), iso: new Date().toISOString() });
 }
 
 // ============================================================
-// 6. POST — SIMPAN NILAI
+// 9. HANDLER — SUBMIT SCORE
+// ============================================================
+function handleSubmitScore(data) {
+  const token = safeString(data.token).trim();
+  const user = validateSession(token);
+  if (!user) {
+    return jsonResponse({ result: 'error', error: 'Sesi tidak valid. Silakan login ulang.' });
+  }
+
+  const nama = safeString(data.nama).trim() || safeString(user['Nama']).trim();
+  if (!nama) return jsonResponse({ result: 'error', error: 'Nama peserta kosong.' });
+  if (nama.length > MAX_NAME_LENGTH) {
+    return jsonResponse({ result: 'error', error: 'Nama terlalu panjang (maks ' + MAX_NAME_LENGTH + ').' });
+  }
+
+  const submissionId = safeString(data.submissionId).trim() ||
+    ('srv_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_HASIL, HEADERS_HASIL);
+  ensureHeaders(sheet, HEADERS_HASIL);
+
+  // Idempotency check
+  const dupCheck = handleVerify(submissionId);
+  const dupObj = JSON.parse(dupCheck.getContent());
+  if (dupObj && dupObj.success) {
+    return jsonResponse({ result: 'success', duplicated: true, submissionId });
+  }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(h => String(h).trim());
+  const row = new Array(headers.length).fill('');
+
+  const values = {
+    'Timestamp':      new Date(),
+    'Nama Peserta':   nama,
+    'Kuis':           sanitizeScore(data.kuis),
+    'Ketik Word':     sanitizeScore(data.word),
+    'Tabel Excel':    sanitizeScore(data.excel),
+    'Presentasi PPT': sanitizeScore(data.presentasi),
+    'Pidato Jawa':    sanitizeScore(data.pidato),
+    'Simulasi Rapat': sanitizeScore(data.rapat),
+    'Wawancara':      sanitizeScore(data.wawancara),
+    'Psikologi':      sanitizeScore(data.psikologi),
+    'Paket':          safeString(data.paket).trim(),
+    'SubmissionId':   submissionId,
+    'UserID':         user['ID'],
+    'Username':       user['Username']
+  };
+
+  headers.forEach((h, i) => {
+    if (h in values) row[i] = values[h];
+  });
+
+  sheet.appendRow(row);
+
+  return jsonResponse({
+    result: 'success',
+    submissionId,
+    row: sheet.getLastRow()
+  });
+}
+
+// ============================================================
+// 10. DO GET
+// ============================================================
+function doGet(e) {
+  if (!e || !e.parameter) {
+    return jsonResponse({ status: "API Aktif", ts: new Date().toISOString() });
+  }
+
+  const action = String(e.parameter.action || '').trim();
+
+  try {
+    if (action === 'getQuestions') return handleGetQuestions();
+    if (action === 'getPidato')    return handleGetPidato();
+    if (action === 'verify')       return handleVerify(e.parameter.id);
+    if (action === 'ping')         return handlePing();
+    return errorResponse("Action tidak dikenali: " + action);
+  } catch (err) {
+    console.error('[doGet] Error:', err);
+    return errorResponse(err.message || String(err));
+  }
+}
+
+// ============================================================
+// 11. DO POST
 // ============================================================
 function doPost(e) {
   try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return jsonResponse({ result: 'error', error: 'Tidak ada data yang diterima.' });
+    if (!e) return errorResponse('Request kosong.');
+
+    const action = (e.parameter && e.parameter.action)
+      ? String(e.parameter.action).trim()
+      : '';
+
+    if (!e.postData || !e.postData.contents) {
+      return errorResponse('Body kosong.');
     }
 
     let data;
     try {
       data = JSON.parse(e.postData.contents);
     } catch (parseErr) {
-      return jsonResponse({ result: 'error', error: 'Body bukan JSON valid.' });
+      return errorResponse('Body bukan JSON valid.');
     }
 
     if (!data || typeof data !== 'object') {
-      return jsonResponse({ result: 'error', error: 'Payload tidak valid.' });
+      return errorResponse('Payload tidak valid.');
     }
 
-    const nama = safeString(data.nama).trim();
-    if (!nama) return jsonResponse({ result: 'error', error: 'Nama peserta kosong.' });
-    if (nama.length > MAX_NAME_LENGTH) {
-      return jsonResponse({ result: 'error', error: 'Nama terlalu panjang (maks ' + MAX_NAME_LENGTH + ').' });
+    // Score submission (default / explicit)
+    if (!action || action === 'submitScore') {
+      return handleSubmitScore(data);
     }
 
-    const submissionId = safeString(data.submissionId).trim() ||
-      ('srv_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+    // Auth
+    if (action === 'register')     return jsonResponse(handleRegister(data));
+    if (action === 'login')        return jsonResponse(handleLogin(data));
+    if (action === 'logout')       return jsonResponse(handleLogout(data));
+    if (action === 'checkSession') return jsonResponse(handleCheckSession(data.token));
 
-    const ss = getSpreadsheet();
-    const sheet = getOrCreateSheet(ss, SHEET_HASIL, HEADERS_HASIL);
-    ensureHeaders(sheet, HEADERS_HASIL);
+    // Admin
+    if (action === 'listUsers')    return jsonResponse(handleListUsers(data.token));
+    if (action === 'approveUser')  return jsonResponse(handleApproveUser(data.token, data.userId));
+    if (action === 'rejectUser')   return jsonResponse(handleRejectUser(data.token, data.userId));
+    if (action === 'deleteUser')   return jsonResponse(handleDeleteUser(data.token, data.userId));
+    if (action === 'getResults')   return jsonResponse(handleGetResults(data.token));
 
-    // --- Idempotency: skip jika submissionId sudah ada di 100 baris terakhir ---
-    const dupCheck = handleVerify(submissionId);
-    const dupObj = JSON.parse(dupCheck.getContent());
-    if (dupObj && dupObj.success) {
-      return jsonResponse({ result: 'success', duplicated: true, submissionId });
-    }
-
-    // --- Bangun row sesuai urutan header aktual ---
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
-      .map(h => String(h).trim());
-    const row = new Array(headers.length).fill('');
-
-    const values = {
-      'Timestamp':      new Date(),
-      'Nama Peserta':   nama,
-      'Kuis':           sanitizeScore(data.kuis),
-      'Ketik Word':     sanitizeScore(data.word),
-      'Tabel Excel':    sanitizeScore(data.excel),
-      'Presentasi PPT': sanitizeScore(data.presentasi),
-      'Pidato Jawa':    sanitizeScore(data.pidato),
-      'Simulasi Rapat': sanitizeScore(data.rapat),
-      'Wawancara':      sanitizeScore(data.wawancara),
-      'Psikologi':      sanitizeScore(data.psikologi),
-      'Paket':          safeString(data.paket).trim(),
-      'SubmissionId':   submissionId
-    };
-
-    headers.forEach((h, i) => {
-      if (h in values) row[i] = values[h];
-    });
-
-    sheet.appendRow(row);
-
-    return jsonResponse({
-      result: 'success',
-      submissionId,
-      row: sheet.getLastRow()
-    });
+    return errorResponse('Action tidak dikenali: ' + action);
 
   } catch (err) {
     console.error('[doPost] Error:', err);
-    return jsonResponse({ result: 'error', error: err.message || String(err) });
+    return errorResponse(err.message || String(err));
   }
 }
 
 // ============================================================
-// 7. ADMIN — SETUP & MAINTENANCE (jalankan manual dari editor)
+// 12. SETUP — JALANKAN SEKALI DARI EDITOR
 // ============================================================
-
 /**
- * Inisialisasi semua sheet + header. Jalankan sekali setelah spreadsheets dibuat.
+ * Inisialisasi semua sheet + header. Jalankan sekali setelah Spreadsheet dibuat.
  */
 function setupSpreadsheet() {
   const ss = getSpreadsheet();
-  getOrCreateSheet(ss, SHEET_SOAL,   HEADERS_SOAL);
-  getOrCreateSheet(ss, SHEET_HASIL,  HEADERS_HASIL);
-  getOrCreateSheet(ss, SHEET_PIDATO, HEADERS_PIDATO);
-  ensureHeaders(ss.getSheetByName(SHEET_SOAL),   HEADERS_SOAL);
-  ensureHeaders(ss.getSheetByName(SHEET_HASIL),  HEADERS_HASIL);
-  ensureHeaders(ss.getSheetByName(SHEET_PIDATO), HEADERS_PIDATO);
+
+  getOrCreateSheet(ss, SHEET_SOAL,     HEADERS_SOAL);
+  getOrCreateSheet(ss, SHEET_HASIL,    HEADERS_HASIL);
+  getOrCreateSheet(ss, SHEET_PIDATO,   HEADERS_PIDATO);
+  getOrCreateSheet(ss, SHEET_USERS,    HEADERS_USERS);
+  getOrCreateSheet(ss, SHEET_SESSIONS, HEADERS_SESSIONS);
+
+  const map = {
+    [SHEET_SOAL]: HEADERS_SOAL,
+    [SHEET_HASIL]: HEADERS_HASIL,
+    [SHEET_PIDATO]: HEADERS_PIDATO,
+    [SHEET_USERS]: HEADERS_USERS,
+    [SHEET_SESSIONS]: HEADERS_SESSIONS
+  };
+  Object.keys(map).forEach(name => {
+    ensureHeaders(ss.getSheetByName(name), map[name]);
+  });
+
   SpreadsheetApp.getUi().alert("✅ Setup selesai. Semua sheet & header siap.");
 }
 
 /**
- * Bagi soal ke 5 paket seimbang per kategori (round-robin).
- * Paket dipakai client untuk anti-nyontek (random paket per sesi).
+ * Buat akun admin pertama. Jalankan sekali dari editor.
+ */
+function createDefaultAdmin() {
+  const ui = SpreadsheetApp.getUi();
+  const uPrompt = ui.prompt('Buat Admin', 'Username admin (lowercase, min 3):', ui.ButtonSet.OK_CANCEL);
+  if (uPrompt.getSelectedButton() !== ui.Button.OK) return;
+
+  const pPrompt = ui.prompt('Buat Admin', 'Password admin (min 6 karakter):', ui.ButtonSet.OK_CANCEL);
+  if (pPrompt.getSelectedButton() !== ui.Button.OK) return;
+
+  const username = uPrompt.getResponseText().trim().toLowerCase();
+  const password = pPrompt.getResponseText();
+
+  if (username.length < 3 || password.length < 6) {
+    return ui.alert('❌ Username/password tidak valid.');
+  }
+  if (findUserByUsername(username)) {
+    return ui.alert('❌ Username sudah ada.');
+  }
+
+  const salt = generateSalt();
+  const id = 'u_' + Date.now().toString(36) + '_admin';
+  getUsersSheet().appendRow([
+    id, username, hashPassword(password, salt), salt,
+    'Administrator', '', 'admin', 'approved',
+    new Date().toISOString(), new Date().toISOString(), 'system', ''
+  ]);
+
+  ui.alert('✅ Admin dibuat.\nUsername: ' + username + '\nLogin di web untuk mulai.');
+}
+
+// ============================================================
+// 13. ADMIN — CONTENT SETUP
+// ============================================================
+/**
+ * Bagi soal ke 5 paket seimbang per kategori.
+ * Jalankan manual dari editor setelah BankSoal terisi.
  */
 function bagiSoalKe5Paket() {
   const JUMLAH_PAKET = 5;
@@ -497,9 +773,7 @@ function bagiSoalKe5Paket() {
     });
     const assign = {};
     Object.values(perCat).forEach(list => {
-      list.forEach((rowIdx, j) => {
-        assign[rowIdx] = (j % JUMLAH_PAKET) + 1;
-      });
+      list.forEach((rowIdx, j) => { assign[rowIdx] = (j % JUMLAH_PAKET) + 1; });
     });
     return assign;
   }
@@ -519,7 +793,7 @@ function bagiSoalKe5Paket() {
 }
 
 /**
- * Setup sheet TeksPidato dengan 5 teks pidato Bahasa Jawa.
+ * Setup sheet TeksPidato dengan 5 teks pidato Bahasa Jawa standar.
  * PERINGATAN: akan menimpa sheet yang sudah ada.
  */
 function setupTeksPidatoOtomatis() {
@@ -555,51 +829,37 @@ Innalillahi wa inna ilaihi raji'un.
 Alhamdulillahirabbil 'alamin, washalatu wasalamu 'ala asyrafil ambiya'i wal mursalin, wa 'ala alihi wa shahbihi ajma'in. Amma ba'du.
 Dhumateng para sesepuh, pinisepuh ingkang tansah dahat kinabekten.
 Dhumateng para takziyah, para tangga teparo, dalah para rawuh sedaya ingkang winantu ing pakurmatan.
-Kula minangka sesulih utawi wakilipun kulawarga ageng ahli waris saking almarhum Bapak Harjo Sunarto, kanthi raos sedhih lan pasrah, keparenga matur wonten ngarsa panjenengan sedaya.
-Ingkang kapisan, minangka titah sawantah, sumangga kita tansah ngunjukaken raos puji syukur wonten ngarsanipun Gusti Allah SWT. Dene ing kalodhangan menika kita saged kempal manunggal wonten ing dalem duka Dusun Kaliurang mriki, nindakaken kuwajiban sesarengan nguntapaken jenazah, kanthi wilujeng nir ing sambekala.
-Para rawuh ingkang kinurmatan,
-Gusti Allah Ingkang Maha Kuwaos sampun ngresersaken, bilih ing dinten Kaping Pisan (Minggu) kepengkur, pinanggal 25 Oktober 2026, wanci jam 19.30 WIB, sederek kita, sepuh kita, inggih almarhum Bapak Harjo Sunarto sampun tinimbalan sowan wonten ngarsanipun Gusti Ingkang Maha Kawasa, kanthi tentrem ing yuswa 76 taun.
-Kula minangka pangarsaning dhusun utawi Dukuh wonten ing mriki, ngaturaken matur nuwun ingkang tanpa upami dhumateng panjenengan sedaya, para tangga teparo, lan para takziyah ingkang sampun kersa rawuh. Matur nuwun sanget awit saking pambiyantu panjenengan sedaya, arupi wragad, tanaga, penggalihan, menapa dene donga pamuji ingkang sampun dipun-paringaken kagem almarhum lan ahli waris. Mugi-mugi sedaya amal kesaenan panjenengan dipunwales dening Gusti Allah kanthi berkah ingkang tikel matikel.
-Ingkang kaping kalih, kula minangka wakilipun ahli waris, kanthi andhap asoring manah nyuwun agunging samudrasih pangaksama saking panjenengan sedaya. Mbok bilih ing wekdal gesangipun almarhum Bapak Harjo Sunarto kagadhah kalepatan, tindak-tanduk ingkang kirang mranani, utawi muna-muni ingkang nglarani penggalih panjenengan sedaya, mugi kersa paring pangapunten ingkang tulus lan ikhlas.
-Ugi babagan dunya, bilih almarhum taksih kagadhah urusan utang-piutang menapa dene jaminan kaliyan panjenengan sedaya, kasuwun panjenengan kersa sesambungan kaliyan ahli waris sasampunipun adicara menika, supados sedaya urusan saged dipun-rampungaken kanthi sae lan almarhum saged bidhal kanthi entheng.
-Para rawuh ingkang sinuba ing pakurmatan,
-Sekedhap malih, jenazah almarhum badhe dipun-angkat lan dipun-makamaken wonten ing Makam Sasanalaya Dusun Kaliurang. Pramila, kula nyuwun donga pamuji saking panjenengan sedaya, mugi-mugi almarhum dipun-tampi sedaya amal kesaenanipun, dipun-apunten sedaya dosanipun, dipun-paringi papan ingkang padhang lan jembar, sarta husnul khatimah. Kagem kulawarga ingkang dipun-tinggal, mugi dipun-paringi ketabahan, kesabaran, lan keikhlasan.
-Pungkasaning atur saking kula minangka wakil ahli waris, mbok bilih wonten kiranging aruh, lungguh, lan suguh ingkang boten mranani penggalih panjenengan sedaya, kula nyuwun agunging pangapunten.
+Kula minangka sesulih utawi wakilipun kulawarga ageng ahli waris, kanthi raos sedhih lan pasrah, keparenga matur wonten ngarsa panjenengan sedaya.
+Para rawuh ingkang kinurmatan, Gusti Allah Ingkang Maha Kuwaos sampun ngresersaken, bilih sederek kita, sepuh kita, sampun tinimbalan sowan wonten ngarsanipun Gusti Ingkang Maha Kawasa.
+Kula minangka pangarsaning dhusun, ngaturaken matur nuwun ingkang tanpa upami dhumateng panjenengan sedaya, para tangga teparo, lan para takziyah ingkang sampun kersa rawuh.
+Mugi-mugi sedaya amal kesaenan panjenengan dipunwales dening Gusti Allah kanthi berkah ingkang tikel matikel.
+Kula minangka wakilipun ahli waris, kanthi andhap asoring manah nyuwun agunging samudrasih pangaksama saking panjenengan sedaya. Mbok bilih ing wekdal gesangipun almarhum kagadhah kalepatan, mugi kersa paring pangapunten ingkang tulus lan ikhlas.
+Pungkasaning atur saking kula, mbok bilih wonten kiranging aruh, lungguh, lan suguh ingkang boten mranani penggalih panjenengan sedaya, kula nyuwun agunging pangapunten.
 Mugi Gusti Allah tansah njangkung lampah kita sedaya. Amin.
 Wassalamu'alaikum Warahmatullahi Wabarakatuh.`],
 
     ["budaling", "Budaling Lelayon (Takziah)",
-`Ass. Wr. Wb
-Bismillahirohmanirrohim
-Alhamdulillahi robbil alamin wassolatu wa salamu alla asyrofil anbiya i wal mursalin, wa alla alihi wa sohbihi aj main. Amma ba'du
-Nyuwun panjenenganipun poro sepuh pini sepuh ingkang kinabekten, linangkung bapak Lurah Bangunharjo, Bapak Nur Hidayat Sag Msi ingkang tansah kinurmatan, ibu RT 1, bapak RT 02, bapak RT 08&9 jotawang, tokoh masyarakat, Simbah kaum Rois lan sagung poro takziah kakung soho putri ingkang tansah kulo hormati.
-Pinongko purwakaning atur, sumawi kulo derekaken manengku pujo wonten ngarso dalem allah ta'alla. Ingkang tansah soho taseh paring rahmat, hidayah soho inayahipun
+`Ass. Wr. Wb.
+Bismillahirohmanirrohim.
+Alhamdulillahi robbil alamin wassolatu wa salamu alla asyrofil anbiya i wal mursalin, wa alla alihi wa sohbihi aj main. Amma ba'du.
+Nyuwun panjenenganipun poro sepuh pini sepuh ingkang kinabekten, linangkung bapak Lurah, bapak RT, tokoh masyarakat, Simbah kaum Rois lan sagung poro takziah kakung soho putri ingkang tansah kulo hormati.
+Pinongko purwakaning atur, sumawi kulo derekaken manengku pujo wonten ngarso dalem allah ta'alla. Ingkang tansah soho taseh paring rahmat, hidayah soho inayahipun.
 Rahmat soho salam mugi karentahno dumateng junjungan kito nabi agung muhammad SAW sak garwo putro soho penderekipun ingkang tansah kito antu2 syafaatipun wonten ing yaumul qiyamah sak mangke.
-Sak lajengipun, sedoyo ahli waris, hangaturaken pambagyo kawilujengan sugeng rawuh soho ngaturaken sanget agunging panuwun ingkang tanpo pepindan, Dene panjengan sami sampun kepareng hangentengaken saliro, mijiaken wekdal rawuh inggih kejawi nglaeraken raos sungkowo, ugi paring pakurmatan ingkang pungkasan dumateng almarhum bapak Herlan Setiabudi
-Sagung poro takziah ingkang minulyo, atur uningo bilih ing dinten Jumat pon, suryo kaping 18 wulan september warso 2026 kirang langkung tabuh 04.15 enjing, panjenganipun almarhum bapak Herlan Setiabudi tinimbalan sowan wonten ngarsa dalem Allah ta'ala.
-Sedanipun almarhum pinaringan ganjaran yuswo kirang langkung 62 th. (Kanti nilar garwo 1, Putro putrinipun 3,) Pramilo kanti puniko nyuwun panjurung dongo dumateng poro takziah kakung soho putri amrih sowanipun almarhum bapak Herlan Setiabudi wonten ngarsanipun gusti Allah dipun tampi sedoyo amal kesaenanipun, dipun apunten sedoyo doso kalepatanipun pinaringan padang jembar kuburipun lan ugi sedanipun kalebetno sedo ingkang husnul khotimah Aamiin 3x YRA.
-(Pramilo kanti meniko mbok bilih rikolo sugengipun almarhum anggenipun sesrawungan dumateng panjenengan pinanggih bab2 ingkang dereng karampungaken, sae puniko sambet sinambet soho hak2 adami, panjenengan saget irembakan kaliyan sedoyo ahli warisipun.
-Ewo semanten mbok bilih sampun kaikhlasaken lajeng karelaken sedoyo ahli waris namung saget ngaturaken sanget agunging panuwun.)
-Sagung poro takziah ingkang minulyo, wonten ing kalodangan puniko mboten kesupen, sedoyo ahli waris ugi ngaturaken sanget agunging panuwun dumateng tonggo tepalih, sanak kadang, pamong mitro, ingkang sampun kepareng paring pambiantu ingkang awujud nopo kemawon.
-Pinongko pungkasaning atur, nyuwun dumateng panjenengan kerso derekaken lampahing jenazah ingkang sak mangke dipun sareaken ing makam suci Salakan jotawang, Bangunharjo Sewon bantul..
-Ewo semanten, ingkang gadahi sesanggeman sanes, lajeng enggal2 bade ngersa'aken kondur sedoyo ahli waris ngaturaken sugeng kondur mugi tansah rahayu ingkang pinanggih.
-Soho anggenipun nampi karawuhan panjenengan sami bilih wonten kirangipun karono kawontenan ahli waris nyuwun agunging Samudro pangaksami.
+Sak lajengipun, sedoyo ahli waris, hangaturaken pambagyo kawilujengan sugeng rawuh soho ngaturaken sanget agunging panuwun ingkang tanpo pepindan, Dene panjengan sami sampun kepareng hangentengaken saliro, mijiaken wekdal rawuh inggih kejawi nglaeraken raos sungkowo, ugi paring pakurmatan ingkang pungkasan dumateng almarhum.
+Pinongko pungkasaning atur, nyuwun dumateng panjenengan kerso derekaken lampahing jenazah ingkang sak mangke dipun sareaken ing makam suci.
 Poro takziah kakung soho putri mekaten aturipun ahli waris almarhum lumantar kulo, mbok bilih anggenipun kulo matur pinanggih lepat ing mriki kulo nyuwun agunging pangapunten.
-Akhiruk kalam Assalammu alaikum wr.wb`],
+Akhiruk kalam Assalammu alaikum wr.wb.`],
 
     ["pasrah", "Atur Pasrah Penganten (Pawiwahan)",
 `Assalamu'alaikum Warahmatullahi Wabarakatuh.
 Alhamdulillahirabbil 'alamin, washalatu wasalamu 'ala asyrafil ambiya'i wal morsalin, wa 'ala alihi wa shahbihi ajma'in. Amma ba'du.
 Dhumateng para sesepuh, pinisepuh ingkang tansah dahat kinabekten.
-Dhumateng kulawarga ageng Bapak Harjo Sunarto ingkang satuhu kinurmatan. Mligi dhumateng Bapak Dukuh Mangunsuwito saking Dusun Kaliurang ingkang sinudarsana.
-Kula, minangka sesulih utawi wakilipun Bapak kaliyan Ibu Hardi Wibowo saking Dusun Kasongan, Kasihan, Bantul, keparenga matur wonten ngarsa panjenengan sedaya.
-Ingkang kapisan, sumangga kita tansah ngaturaken raos syukur dhumateng Gusti Allah SWT, ingkang sampun paring kesarasan lan kalodhangan, saengga kita saged kempal manunggal wonten ing adicara pawiwahan menika kanthi wilujeng nir ing sambekala.
-Ingkang kaping kalih, kula ngaturaken salam taklimipun Bapak kaliyan Ibu Hardi Wibowo katur dhumateng Bapak kaliyan Ibu Harjo Sunarto sakulawarga, kanthi pamuji mugi-mugi keslametan lan kabagyan tansah kajiwa kasasar dhumateng kita sedaya.
-Para rawuh ingkang kinurmatan,
-Wosing gati utawi tujuwan sowan kula sakanca ing mriki, inggih menika nindakaken amanah pasrah penganten. Kula pasrahaken dhumateng kulawarga mriki, bilih anak mas Bagus Purnomo ingkang sampun nindakaken akad nikah, kanthi tulus ikhlasing manah kersaa dipunwengku lan dipuntampi dados kulawarga ageng wonten ing Dusun Kaliurang mriki.
-Minangka mudha-mudhi ingkang nembe ngancik dunya bebrayan, anak mas Bagus Purnomo menika taksih kirang pengalamanipun, taksih kathah kekiranganipun, lan taksih mbetahaken bimbingan. Mligi kagem Bapak Dukuh Mangunsuwito ing mriki lan para sesepuh, kula titip anak kula menika supados dipun-didik, dipun-arahaken, saengga saged dados warga dusun ingkang sae, saged manunggal kaliyan masyarakat, lan saged mbangun kulawarga ingkang sakinah, mawaddah, warahmah.
-Kanthi tulus ikhlas, mangga penganten putra menika dipungandheng kaliyan penganten putri, dipunbimbing sesarengan wonten ing margining kabagyan.
-Ingkang pungkasan, kula sakulawarga saking Dusun Kasongan nyuwun agunging samudrasih pangaksama, mbok bilih wonten tindak-tanduk, muna-muni, utawi tata krami sowan kula sakanca ingkang kirang mranani penggalih panjenengan sedaya.
+Dhumateng kulawarga ageng ingkang satuhu kinurmatan.
+Kula, minangka sesulih utawi wakilipun Bapak kaliyan Ibu, keparenga matur wonten ngarsa panjenengan sedaya.
+Ingkang kapisan, sumangga kita tansah ngaturaken raos syukur dhumateng Gusti Allah SWT, ingkang sampun paring kesarasan lan kalodhangan, saengga kita saged kempal manunggal wonten ing adicara pawiwahan menika kanthi wilujeng.
+Wosing gati utawi tujuwan sowan kula sakanca ing mriki, inggih menika nindakaken amanah pasrah penganten. Kula pasrahaken dhumateng kulawarga mriki, bilih anak mas penganten putra ingkang sampun nindakaken akad nikah, kanthi tulus ikhlasing manah kersaa dipunwengku lan dipuntampi dados kulawarga ageng.
+Minangka mudha-mudhi ingkang nembe ngancik dunya bebrayan, anak mas taksih kirang pengalamanipun, taksih kathah kekiranganipun, lan taksih mbetahaken bimbingan. Mligi kagem Bapak Dukuh lan para sesepuh, kula titip anak kula menika supados dipun-didik, dipun-arahaken, saengga saged dados warga dusun ingkang sae.
+Ingkang pungkasan, kula sakulawarga nyuwun agunging samudrasih pangaksama, mbok bilih wonten tindak-tanduk, muna-muni, utawi tata krami sowan kula sakanca ingkang kirang mranani penggalih panjenengan sedaya.
 Mugi Gusti Allah SWT tansah njangkung lan ngijabahi niat sae kita sedaya. Amin.
 Wassalamu'alaikum Warahmatullahi Wabarakatuh.`],
 
@@ -607,17 +867,14 @@ Wassalamu'alaikum Warahmatullahi Wabarakatuh.`],
 `Assalamu'alaikum Warahmatullahi Wabarakatuh.
 Bismillah walhamdulillah, washalahtu wasalamu 'ala rasulillah, sayyidina Muhammadin wa 'ala alihi wa sahbihi ajma'in. Amma ba'du.
 Dhumateng para sesepuh, pinisepuh ingkang satuhu pantes sinudarsana.
-Dhumateng Bapak Dukuh Sujatmiko saking Dusun Kasongan, Bantul dalah para pengombyong penganten putra ingkang agung kasatriyanipun.
-Serta kulawarga ageng Bapak kaliyan Ibu Harjo Sunarto ingkang bagya mulya.
-Kula minangka sesulih utawi wakil saking kulawarga ageng Bapak Harjo Sunarto, ugi minangka pangarsaning dhusun utawi Dukuh wonten ing Kaliurang mriki, keparenga amangsuli atur pasrah ingkang sampun dipun-andharaken kanthi cetha wela-wela dhumateng kita sedaya.
-Ingkang kapisan, sumangga kita sesarengan ngaturaken puja lan puji syukur wonten ngarsanipun Gusti Ingkang Maha Agung, amargi kanthi rahmat lan hidayah-Ipun, rombongan penganten putra saged rawuh kanthi binerkahan keslametan, boten wonten alangan satunggal menika.
-Ingkang kaping kalih, kula nampi salam taklimipun saking Bapak kaliyan Ibu Hardi Wibowo saking Dusun Kasongan. Kula wangsuli kanthi salam taklim ingkang sami, mugi sesambungan paseduluran ingkang sae menika saged tansah rumaket ngantos akhir jaman.
-Para rawuh ingkang sinuba ing pakurmatan,
-Ngenani wosing gati pasrah panjenengan, kula minangka wakil kulawarga lan minangka pamong wonten ing Dusun Kaliurang mriki, kanthi thukul ikhlasing manah, nampi kanthi asta kalih lan gumbiranipun penggalih pasrah penganten putra, inggih anak mas Bagus Purnomo.
-Mulai detik menika, anak mas Bagus Purnomo sampun resmi dados perangan saking kulawarga ageng Bapak Harjo Sunarto, lan ugi sah dados warga dhusun kita wonten ing mriki.
-Babagan bimbingan lan pituduh ingkang dipun-kersaken wau, sampun dados kuwajiban kita sedaya minangka tiyang sepuh lan pamong. Kita badhe sesarengan njagi, ngarahaken, lan ndedonga, mugi-mugi penganten kekalih, anak mas Bagus Purnomo lan anak roro Siti Rahayu, saged nyawiji, asah, asih, asuh, nemtokaken jangkah ingkang sae, lan saged mbangun kulawarga ingkang bagya mulya, ngantos kaken-kaken ninen-ninen.
-Salajengipun, sumangga para tamu pengombyong saking Dusun Kasongan, kula aturi lenggah kanthi sekeca, kanthi mardikaning penggalih, ngrahapi dedhaharan lan pasugatan ingkang sampun dicepakaken, senadyan wontenipun namung prasaja.
-Pungkasaning atur, kula minangka wakil mriki nyuwun pangapunten ingkang agung, mbok bilih wonten thithik kuciwaning aruh, lungguh, lan suguh ingkang kirang nengsemaken wonten ing manah panjenengan sedaya.
+Dhumateng Bapak Dukuh dalah para pengombyong penganten putra ingkang agung kasatriyanipun.
+Serta kulawarga ageng ingkang bagya mulya.
+Kula minangka sesulih utawi wakil saking kulawarga ageng, ugi minangka pangarsaning dhusun, keparenga amangsuli atur pasrah ingkang sampun dipun-andharaken kanthi cetha wela-wela dhumateng kita sedaya.
+Ingkang kapisan, sumangga kita sesarengan ngaturaken puja lan puji syukur wonten ngarsanipun Gusti Ingkang Maha Agung, amargi kanthi rahmat lan hidayah-Ipun, rombongan penganten putra saged rawuh kanthi binerkahan keslametan.
+Para rawuh ingkang sinuba ing pakurmatan, ngenani wosing gati pasrah panjenengan, kula minangka wakil kulawarga lan minangka pamong wonten ing dhusun mriki, kanthi thukul ikhlasing manah, nampi kanthi asta kalih lan gumbiranipun penggalih pasrah penganten putra.
+Mulai detik menika, anak mas penganten putra sampun resmi dados perangan saking kulawarga ageng mriki, lan ugi sah dados warga dhusun kita.
+Babagan bimbingan lan pituduh ingkang dipun-kersaken wau, sampun dados kuwajiban kita sedaya minangka tiyang sepuh lan pamong. Kita badhe sesarengan njagi, ngarahaken, lan ndedonga, mugi-mugi penganten kekalih saged nyawiji, asah, asih, asuh, lan saged mbangun kulawarga ingkang bagya mulya, ngantos kaken-kaken ninen-ninen.
+Pungkasaning atur, kula nyuwun pangapunten ingkang agung, mbok bilih wonten thithik kuciwaning aruh, lungguh, lan suguh ingkang kirang nengsemaken.
 Mugi-mugi Gusti Allah tansah mberkahi adicara menika. Amin.
 Wassalamu'alaikum Warahmatullahi Wabarakatuh.`]
   ];
@@ -630,17 +887,11 @@ Wassalamu'alaikum Warahmatullahi Wabarakatuh.`]
 }
 
 // ============================================================
-// 8. ADMIN — DIAGNOSTICS
+// 14. ADMIN — DIAGNOSTICS & MAINTENANCE
 // ============================================================
-/**
- * Health check semua endpoint + cek sheet. Jalankan dari editor.
- */
 function diagnoseAll() {
-  const lines = [];
-  lines.push('=== DIAGNOSTIC ===');
-  lines.push('Time: ' + new Date().toISOString());
+  const lines = ['=== DIAGNOSTIC ===', 'Time: ' + new Date().toISOString()];
 
-  // 1. Config
   try {
     const ss = getSpreadsheet();
     lines.push('✅ Spreadsheet: ' + ss.getName());
@@ -650,53 +901,55 @@ function diagnoseAll() {
     return SpreadsheetApp.getUi().alert(lines.join('\n'));
   }
 
-  // 2. Sheets
   const ss = getSpreadsheet();
-  [SHEET_SOAL, SHEET_HASIL, SHEET_PIDATO].forEach(name => {
+  [SHEET_SOAL, SHEET_HASIL, SHEET_PIDATO, SHEET_USERS, SHEET_SESSIONS].forEach(name => {
     const sh = ss.getSheetByName(name);
     if (!sh) {
-      lines.push('⚠️ Sheet "' + name + '" tidak ada (akan dibuat otomatis saat digunakan).');
+      lines.push('⚠️ Sheet "' + name + '" tidak ada (akan dibuat otomatis).');
     } else {
-      lines.push('✅ Sheet "' + name + '": ' + (sh.getLastRow() - 1) + ' baris data, ' + sh.getLastColumn() + ' kolom.');
+      lines.push('✅ Sheet "' + name + '": ' + Math.max(0, sh.getLastRow() - 1) + ' baris, ' + sh.getLastColumn() + ' kolom.');
     }
   });
 
-  // 3. Test endpoints
   try {
-    const q = handleGetQuestions();
-    const qData = JSON.parse(q.getContent());
-    lines.push('✅ getQuestions: ' + qData.length + ' soal');
-    if (qData.length > 0) {
-      lines.push('   Sample: "' + String(qData[0].question).slice(0, 60) + '..."');
-    }
-  } catch (e) {
-    lines.push('❌ getQuestions: ' + e.message);
-  }
+    const q = JSON.parse(handleGetQuestions().getContent());
+    lines.push('✅ getQuestions: ' + q.length + ' soal');
+  } catch (e) { lines.push('❌ getQuestions: ' + e.message); }
 
   try {
-    const p = handleGetPidato();
-    const pData = JSON.parse(p.getContent());
-    lines.push('✅ getPidato: ' + pData.length + ' teks');
-  } catch (e) {
-    lines.push('❌ getPidato: ' + e.message);
-  }
+    const p = JSON.parse(handleGetPidato().getContent());
+    lines.push('✅ getPidato: ' + p.length + ' teks');
+  } catch (e) { lines.push('❌ getPidato: ' + e.message); }
+
+  try {
+    const u = readSheetAsObjects(getUsersSheet());
+    const approved = u.rows.filter(r => String(r['Status']) === 'approved').length;
+    const pending  = u.rows.filter(r => String(r['Status']) === 'pending').length;
+    lines.push('✅ Users: ' + u.rows.length + ' total (' + approved + ' approved, ' + pending + ' pending)');
+  } catch (e) { lines.push('❌ Users: ' + e.message); }
 
   try {
     const v = handleVerify('__test_nonexistent__');
     const vData = JSON.parse(v.getContent());
     lines.push('✅ verify: respons valid (' + JSON.stringify(vData) + ')');
-  } catch (e) {
-    lines.push('❌ verify: ' + e.message);
-  }
+  } catch (e) { lines.push('❌ verify: ' + e.message); }
 
   lines.push('=== END ===');
   SpreadsheetApp.getUi().alert(lines.join('\n'));
   console.log(lines.join('\n'));
 }
 
-/**
- * Reset HasilUjian — hapus semua baris data (header tetap). Dengan konfirmasi.
- */
+function clearCache() {
+  try {
+    const c = CacheService.getScriptCache();
+    c.remove('bs_v4');
+    c.remove('pd_v4');
+    SpreadsheetApp.getUi().alert('✅ Cache dibersihkan. Perubahan terlihat pada request berikutnya.');
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('⚠️ ' + e.message);
+  }
+}
+
 function resetHasilUjian() {
   const ui = SpreadsheetApp.getUi();
   const confirm = ui.alert(
@@ -709,6 +962,7 @@ function resetHasilUjian() {
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName(SHEET_HASIL);
   if (!sheet) return ui.alert('Sheet HasilUjian tidak ditemukan.');
+
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return ui.alert('Sheet sudah kosong (hanya header).');
 
@@ -717,9 +971,6 @@ function resetHasilUjian() {
   ui.alert('✅ ' + (lastRow - 1) + ' baris dihapus.');
 }
 
-/**
- * Isi SubmissionId untuk baris lama yang belum punya (migrasi).
- */
 function backfillSubmissionIds() {
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName(SHEET_HASIL);
@@ -742,17 +993,4 @@ function backfillSubmissionIds() {
     }
   }
   SpreadsheetApp.getUi().alert('✅ Backfill selesai. ' + filled + ' baris diisi SubmissionId.');
-}
-
-/**
- * Bersihkan cache (setelah edit BankSoal / TeksPidato).
- */
-function clearCache() {
-  try {
-    CacheService.getScriptCache().remove('bs_v3');
-    CacheService.getScriptCache().remove('pd_v3');
-    SpreadsheetApp.getUi().alert('✅ Cache dibersihkan. Perubahan akan terlihat pada request berikutnya.');
-  } catch (e) {
-    SpreadsheetApp.getUi().alert('⚠️ ' + e.message);
-  }
 }
