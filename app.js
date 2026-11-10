@@ -1,5 +1,7 @@
 // ==========================================
-// app.js — FULL FIXED VERSION (v5 - Smart Type)
+// app.js — FULL FIXED VERSION (v7)
+// Auth + Randomization + Sejarah Lokal Bangunharjo
+// Kompatibel dengan api.js v5 & code.gs v4
 // ==========================================
 
 // ==========================================
@@ -7,10 +9,15 @@
 // ==========================================
 const ALL_ROUTES = ['#/dashboard', '#/kuis', '#/psikologi', '#/wawancara', '#/komputer', '#/pidato', '#/rapat'];
 
+const Auth = {
+    user: null,
+    token: localStorage.getItem('dukuh_token') || ''
+};
+
 const State = {
-    scores: JSON.parse(localStorage.getItem('dukuh_scores')) || {
-        kuis: null, word: null, excel: null, presentasi: null, pidato: null, rapat: null,
-        wawancara: null, psikologi: null
+    scores: {
+        kuis: null, word: null, excel: null, presentasi: null,
+        pidato: null, rapat: null, wawancara: null, psikologi: null
     },
     questions: [],
     pidatoList: [],
@@ -25,10 +32,7 @@ const State = {
         excelActive: false, excelEndTime: 0, excelTimer: null,
         wordPage: 1, excelTab: 1
     },
-    ppt: {
-        active: false, currentSlide: 0, data: [],
-        timer: null
-    },
+    ppt: { active: false, currentSlide: 0, data: [], timer: null },
     rapatDrama: { active: false, scenario: 0, step: 0, peace: 100, timer: null, typeTimer: null, nextTimer: null, history: [] },
     wawancara: { active: false, index: 0, score: 0, pointsPerQ: 20, activeQuestions: [], isSpeaking: false },
     psikologi: { active: false, index: 0, score: 0, pointsPerQ: 0, activeQuestions: [] },
@@ -48,7 +52,28 @@ let speechStartTime = 0;
 let currentHighlightIndex = -1;
 let wordTimings = [];
 
-const saveScores = () => localStorage.setItem('dukuh_scores', JSON.stringify(State.scores));
+const saveScores = () => {
+    if (!Auth.user) return;
+    try {
+        localStorage.setItem('dukuh_scores_' + Auth.user.id, JSON.stringify(State.scores));
+    } catch (e) { console.warn('[saveScores]', e); }
+};
+
+function loadUserScores() {
+    State.scores = {
+        kuis: null, word: null, excel: null, presentasi: null,
+        pidato: null, rapat: null, wawancara: null, psikologi: null
+    };
+    if (!Auth.user) return;
+    try {
+        const stored = JSON.parse(localStorage.getItem('dukuh_scores_' + Auth.user.id));
+        if (stored && typeof stored === 'object') {
+            Object.keys(State.scores).forEach(k => {
+                if (stored[k] !== null && stored[k] !== undefined) State.scores[k] = stored[k];
+            });
+        }
+    } catch (e) { console.warn('[loadUserScores]', e); }
+}
 
 // ==========================================
 // 2. UTILITIES
@@ -132,7 +157,207 @@ function textMatchPercent(userText, refText) {
 }
 
 // ==========================================
-// 3. NAVIGATION
+// 2b. PENGACAKAN SOAL
+// ==========================================
+const RANDOM_CONFIG = {
+    kuisQuestions:      true,
+    kuisOptions:        true,
+    psikologiQuestions: true,
+    psikologiOptions:   true,
+    wawancaraQuestions: true,
+    wawancaraOptions:   true,
+    showNotice:         true
+};
+
+function shuffleArray(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+function shuffleQuestionOptions(q) {
+    if (!q || q.tipe !== 'pg') return q;
+    if (!Array.isArray(q.options) || q.options.length < 2) return q;
+
+    const correctIdx = resolveCorrectIndex(q);
+    if (correctIdx < 0 || correctIdx >= q.options.length) return q;
+
+    const perm = shuffleArray(q.options.map((_, i) => i));
+    const newOptions = perm.map(i => q.options[i]);
+    const newAnswer  = perm.indexOf(correctIdx);
+
+    return { ...q, options: newOptions, answer: newAnswer };
+}
+
+function shuffleSjtOptions(item) {
+    if (!item || !Array.isArray(item.opts) || item.opts.length < 2) return item;
+    if (typeof item.ans !== 'number' || item.ans < 0 || item.ans >= item.opts.length) return item;
+
+    const perm = shuffleArray(item.opts.map((_, i) => i));
+    const newOpts = perm.map(i => item.opts[i]);
+    const newAns  = perm.indexOf(item.ans);
+
+    return { ...item, opts: newOpts, ans: newAns };
+}
+
+// ==========================================
+// 3. AUTH SCREENS
+// ==========================================
+function renderAuthForm(mode) {
+    const el = document.getElementById('auth-screen');
+    if (!el) return;
+    el.classList.remove('hidden');
+    if (mode === 'register') {
+        el.innerHTML = `
+            <div class="auth-card">
+                <div class="auth-logo">PD</div>
+                <h1 class="auth-title">Daftar Akun</h1>
+                <p class="auth-subtitle">Setelah mendaftar, akun Anda akan direview admin sebelum bisa digunakan.</p>
+                <form id="register-form" onsubmit="handleRegisterSubmit(event)">
+                    <label class="auth-label" for="reg-username">Username</label>
+                    <input type="text" id="reg-username" class="input-field" placeholder="contoh: budi_santoso" required minlength="3" pattern="[a-z0-9_]+" title="Huruf kecil, angka, underscore" autocomplete="username">
+                    <label class="auth-label" for="reg-nama">Nama Lengkap</label>
+                    <input type="text" id="reg-nama" class="input-field" placeholder="Sesuai KTP" required autocomplete="name">
+                    <label class="auth-label" for="reg-email">Email (opsional)</label>
+                    <input type="email" id="reg-email" class="input-field" placeholder="email@contoh.com" autocomplete="email">
+                    <label class="auth-label" for="reg-password">Password</label>
+                    <input type="password" id="reg-password" class="input-field" placeholder="Min 6 karakter" required minlength="6" autocomplete="new-password">
+                    <label class="auth-label" for="reg-password2">Konfirmasi Password</label>
+                    <input type="password" id="reg-password2" class="input-field" placeholder="Ulangi password" required minlength="6" autocomplete="new-password">
+                    <button type="submit" class="btn btn-block" id="reg-btn" style="padding:1rem;font-size:1rem;">Daftar</button>
+                </form>
+                <p class="auth-footer">Sudah punya akun? <a href="#" onclick="renderAuthForm('login');return false;">Login di sini</a></p>
+            </div>`;
+    } else {
+        el.innerHTML = `
+            <div class="auth-card">
+                <div class="auth-logo">PD</div>
+                <h1 class="auth-title">Portal Seleksi Dukuh</h1>
+                <p class="auth-subtitle">Masuk untuk memulai ujian komprehensif.</p>
+                <form id="login-form" onsubmit="handleLoginSubmit(event)">
+                    <label class="auth-label" for="login-username">Username</label>
+                    <input type="text" id="login-username" class="input-field" placeholder="Username Anda" required autofocus autocomplete="username">
+                    <label class="auth-label" for="login-password">Password</label>
+                    <input type="password" id="login-password" class="input-field" placeholder="Password" required autocomplete="current-password">
+                    <button type="submit" class="btn btn-block" id="login-btn" style="padding:1rem;font-size:1rem;">Masuk</button>
+                </form>
+                <p class="auth-footer">Belum punya akun? <a href="#" onclick="renderAuthForm('register');return false;">Daftar di sini</a></p>
+            </div>`;
+    }
+}
+
+async function handleLoginSubmit(e) {
+    e.preventDefault();
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const btn = document.getElementById('login-btn');
+    if (btn) { btn.disabled = true; btn.innerText = '⏳ Memproses...'; }
+    try {
+        const res = await apiLogin({ username, password });
+        if (!res.success || !res.token) throw new Error(res.message || 'Login gagal.');
+        Auth.token = res.token;
+        Auth.user = res.user;
+        localStorage.setItem('dukuh_token', res.token);
+        toast(`Selamat datang, ${res.user.nama}!`, 'success');
+        await enterApp();
+    } catch (err) {
+        toast(err.message, 'error');
+        if (btn) { btn.disabled = false; btn.innerText = 'Masuk'; }
+    }
+}
+
+async function handleRegisterSubmit(e) {
+    e.preventDefault();
+    const username = document.getElementById('reg-username').value.trim().toLowerCase();
+    const nama = document.getElementById('reg-nama').value.trim();
+    const email = document.getElementById('reg-email').value.trim();
+    const password = document.getElementById('reg-password').value;
+    const password2 = document.getElementById('reg-password2').value;
+    if (password !== password2) return toast('Password dan konfirmasi tidak cocok.', 'warning');
+    const btn = document.getElementById('reg-btn');
+    if (btn) { btn.disabled = true; btn.innerText = '⏳ Mendaftar...'; }
+    try {
+        const res = await apiRegister({ username, password, nama, email });
+        toast(res.message || 'Pendaftaran berhasil. Menunggu approval admin.', 'success');
+        renderAuthForm('login');
+    } catch (err) {
+        toast(err.message, 'error');
+        if (btn) { btn.disabled = false; btn.innerText = 'Daftar'; }
+    }
+}
+
+async function handleLogout() {
+    if (!confirm('Yakin ingin keluar dari akun ini? Progres lokal tetap tersimpan per-user.')) return;
+    try { await apiLogout(); } catch (e) { /* ignore */ }
+    Auth.user = null;
+    Auth.token = '';
+    localStorage.removeItem('dukuh_token');
+    State.scores = {
+        kuis: null, word: null, excel: null, presentasi: null,
+        pidato: null, rapat: null, wawancara: null, psikologi: null
+    };
+    clearOnNavigate();
+    const appEl = document.getElementById('app');
+    const authScreen = document.getElementById('auth-screen');
+    if (appEl) { appEl.classList.add('hidden'); appEl.classList.remove('loaded'); }
+    if (authScreen) authScreen.classList.remove('hidden');
+    renderAuthForm('login');
+    toast('Anda telah keluar.', 'info');
+}
+
+async function enterApp() {
+    const loader = document.getElementById('global-loader');
+    const appEl = document.getElementById('app');
+    const authScreen = document.getElementById('auth-screen');
+
+    try {
+        await loadDataFromServer();
+    } catch (err) {
+        if (loader) {
+            loader.innerHTML = `
+                <div style="text-align: center; padding: 2rem;">
+                    <h2 style="color: var(--danger); margin-bottom: 1rem;">⚠️ Gagal Memuat Data</h2>
+                    <p style="color: var(--text-main); margin-bottom: 1.5rem;">${err.message}</p>
+                    <button class="btn btn-warning" onclick="location.reload()">🔄 Coba Lagi</button>
+                </div>`;
+        }
+        throw err;
+    }
+
+    loadUserScores();
+
+    if (loader) {
+        loader.style.opacity = '0';
+        setTimeout(() => loader.classList.add('hidden'), 500);
+    }
+    if (authScreen) authScreen.classList.add('hidden');
+    if (appEl) {
+        appEl.classList.remove('hidden');
+        setTimeout(() => appEl.classList.add('loaded'), 50);
+    }
+
+    initNavigation();
+    updateHeaderUser();
+    if (!window.location.hash) window.location.hash = '#/dashboard';
+    router();
+    if ('speechSynthesis' in window) populateVoices();
+}
+
+function updateHeaderUser() {
+    const badge = document.getElementById('user-badge');
+    const logoutBtn = document.getElementById('btn-logout');
+    if (badge && Auth.user) {
+        badge.style.display = 'inline-flex';
+        badge.textContent = `${Auth.user.role === 'admin' ? '👑' : '👤'} ${Auth.user.nama}`;
+    }
+    if (logoutBtn) logoutBtn.classList.toggle('hidden', !Auth.user);
+}
+
+// ==========================================
+// 4. NAVIGATION
 // ==========================================
 function initNavigation() {
     const nav = document.getElementById('nav-menu');
@@ -151,29 +376,33 @@ function initNavigation() {
         a.innerHTML = routeMap[route];
         nav.appendChild(a);
     });
+    if (Auth.user && Auth.user.role === 'admin') {
+        const a = document.createElement('a');
+        a.href = '#/admin';
+        a.className = 'nav-link';
+        a.innerHTML = '⚙️ Admin';
+        nav.appendChild(a);
+    }
 }
 
 // ==========================================
-// 4. DATA FETCHING (SMART TYPE)
+// 5. DATA FETCHING
 // ==========================================
 async function loadDataFromServer() {
     try {
         const [questionsData, pidatoData] = await Promise.all([apiGetQuestions(), apiGetPidato()]);
         if (!questionsData || questionsData.length === 0) throw new Error("Data soal dari Spreadsheet kosong.");
-        
-        // 🔥 SISTEM PINTAR: Normalisasi Tipe Soal
+
         State.questions = questionsData.map(q => {
             let t = String(q.tipe || 'pg').toLowerCase().trim();
-            // Jika mengandung kata 'ura', 'essay', 'isian', jadikan uraian
             if (t.includes('ura') || t.includes('essay') || t.includes('isian') || t.includes('jwb')) {
                 t = 'uraian';
             } else {
-                // Apapun selain uraian, paksa jadi 'pg' (PG, Pilgan, Pilihan Ganda, dll)
-                t = 'pg'; 
+                t = 'pg';
             }
             return { ...q, tipe: t };
         });
-        
+
         State.pidatoList = pidatoData || [];
     } catch (err) {
         throw new Error("Gagal memuat data: " + err.message);
@@ -182,25 +411,39 @@ async function loadDataFromServer() {
 
 async function initApp() {
     const loader = document.getElementById('global-loader');
+    const appEl = document.getElementById('app');
+    const authScreen = document.getElementById('auth-screen');
+
     try {
-        loader.classList.remove('hidden');
-        await loadDataFromServer();
-        loader.style.opacity = '0';
-        setTimeout(() => loader.classList.add('hidden'), 500);
-        const appEl = document.getElementById('app');
-        appEl.classList.remove('hidden');
-        setTimeout(() => appEl.classList.add('loaded'), 50);
-        initNavigation();
-        if (!window.location.hash) window.location.hash = '#/dashboard';
-        router();
-        if ('speechSynthesis' in window) populateVoices();
+        if (loader) { loader.classList.remove('hidden'); loader.style.opacity = '1'; }
+
+        if (Auth.token) {
+            const res = await apiCheckSession();
+            if (res && res.valid && res.user) {
+                Auth.user = res.user;
+                await enterApp();
+                return;
+            }
+            Auth.token = '';
+            localStorage.removeItem('dukuh_token');
+        }
+
+        if (loader) {
+            loader.style.opacity = '0';
+            setTimeout(() => loader.classList.add('hidden'), 400);
+        }
+        if (appEl) appEl.classList.add('hidden');
+        if (authScreen) authScreen.classList.remove('hidden');
+        renderAuthForm('login');
     } catch (err) {
-        loader.innerHTML = `
-            <div style="text-align: center; padding: 2rem;">
-                <h2 style="color: var(--danger); margin-bottom: 1rem;">⚠️ Koneksi Gagal</h2>
-                <p style="color: var(--text-main); margin-bottom: 1.5rem;">${err.message}</p>
-                <button class="btn btn-warning" onclick="location.reload()">🔄 Coba Lagi</button>
-            </div>`;
+        if (loader) {
+            loader.innerHTML = `
+                <div style="text-align: center; padding: 2rem;">
+                    <h2 style="color: var(--danger); margin-bottom: 1rem;">⚠️ Koneksi Gagal</h2>
+                    <p style="color: var(--text-main); margin-bottom: 1.5rem;">${err.message}</p>
+                    <button class="btn btn-warning" onclick="location.reload()">🔄 Coba Lagi</button>
+                </div>`;
+        }
     }
 }
 
@@ -214,7 +457,8 @@ async function refreshData() {
     }
     const btn = document.getElementById('btn-refresh');
     const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳ Memuat...'; btn.disabled = true;
+    btn.innerHTML = '⏳ Memuat...';
+    btn.disabled = true;
     try {
         await loadDataFromServer();
         router();
@@ -222,17 +466,23 @@ async function refreshData() {
     } catch (err) {
         toast(`Gagal: ${err.message}`, "error");
     } finally {
-        btn.innerHTML = originalText; btn.disabled = false;
+        btn.innerHTML = originalText;
+        btn.disabled = false;
     }
 }
 
 // ==========================================
-// 5. ROUTER
+// 6. ROUTER
 // ==========================================
 const routes = {
-    '#/dashboard': renderDashboard, '#/kuis': renderKuis, '#/komputer': renderKomputer,
-    '#/pidato': renderPidato, '#/rapat': renderRapat,
-    '#/wawancara': renderWawancara, '#/psikologi': renderPsikologi
+    '#/dashboard': renderDashboard,
+    '#/kuis': renderKuis,
+    '#/komputer': renderKomputer,
+    '#/pidato': renderPidato,
+    '#/rapat': renderRapat,
+    '#/wawancara': renderWawancara,
+    '#/psikologi': renderPsikologi,
+    '#/admin': renderAdmin
 };
 
 function clearOnNavigate() {
@@ -258,9 +508,24 @@ function clearOnNavigate() {
 }
 
 function router() {
-    clearOnNavigate();
+    if (!Auth.user) {
+        const appEl = document.getElementById('app');
+        const authScreen = document.getElementById('auth-screen');
+        if (appEl) appEl.classList.add('hidden');
+        if (authScreen) authScreen.classList.remove('hidden');
+        return;
+    }
 
     let hash = window.location.hash || '#/dashboard';
+
+    if (hash === '#/admin' && Auth.user.role !== 'admin') {
+        toast('Akses ditolak. Halaman admin hanya untuk administrator.', 'error');
+        window.location.hash = '#/dashboard';
+        return;
+    }
+
+    clearOnNavigate();
+
     const renderFn = routes[hash] || routes['#/dashboard'];
 
     document.querySelectorAll('.nav-link').forEach(link => {
@@ -276,6 +541,7 @@ function router() {
     if (hash === '#/rapat' && State.rapatDrama.active) renderDramaStep();
     if (hash === '#/wawancara' && State.wawancara.active) showWawancaraQuestion();
     if (hash === '#/psikologi' && State.psikologi.active) showPsikologiQuestion();
+    if (hash === '#/admin') loadAdminPanel();
 
     if (hash === '#/kuis' && State.quiz.active) {
         if (State.quiz.endTime - Date.now() <= 0) { finishQuiz(); return; }
@@ -302,9 +568,10 @@ function router() {
 window.addEventListener('hashchange', router);
 
 // ==========================================
-// 6. DASHBOARD VIEW
+// 7. DASHBOARD VIEW
 // ==========================================
 function renderDashboard() {
+    const namaUser = Auth.user ? Auth.user.nama : '';
     return `
         <div style="text-align: center; margin-bottom: 3rem;">
             <h2 style="font-weight: 800; font-size: 2rem; margin-bottom: 0.5rem; color: var(--text-main);">Laporan Hasil Seleksi</h2>
@@ -318,11 +585,11 @@ function renderDashboard() {
         </div>
         <div style="max-width: 500px; margin: 0 auto; background: var(--bg-card); padding: 1.5rem; border-radius: var(--radius-lg); border: 2px solid var(--border);">
             <h4 style="margin-bottom: 1rem; color: var(--text-main); text-align: center;">Kirim Hasil Ujian</h4>
-            <input type="text" id="p-name" class="input-field" placeholder="Ketik Nama Lengkap Sesuai KTP..." required>
+            <input type="text" id="p-name" class="input-field" value="${namaUser}" readonly style="background: var(--bg-main); cursor: not-allowed;">
             <button class="btn btn-warning btn-block" style="font-size: 1.1rem; padding: 1rem;" onclick="syncToServer(this)">🚀 Kirim Nilai ke Server</button>
             <div style="display: flex; gap: 1rem; margin-top: 1rem;">
                 <button class="btn btn-success" style="flex:1;" onclick="window.print()">🖨️ Cetak PDF</button>
-                <button class="btn btn-danger" style="flex:1;" onclick="if(confirm('Hapus semua nilai dan mulai ulang?')){localStorage.clear();location.reload();}">🗑️ Reset</button>
+                <button class="btn btn-danger" style="flex:1;" onclick="if(confirm('Hapus semua nilai lokal Anda dan mulai ulang?')){if(Auth.user){localStorage.removeItem('dukuh_scores_'+Auth.user.id);}location.reload();}">🗑️ Reset</button>
             </div>
         </div>`;
 }
@@ -373,7 +640,7 @@ function updateDashboardView() {
 }
 
 // ==========================================
-// 7. QUIZ VIEW + CONTROLLER
+// 8. QUIZ VIEW + CONTROLLER
 // ==========================================
 function renderKuis() {
     if (!State.quiz.active) {
@@ -388,7 +655,7 @@ function renderKuis() {
                 <div style="font-size: 4rem; margin-bottom: 1rem;">📝</div>
                 <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Ujian Tertulis</h2>
                 <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Ujian ini menguji pengetahuan Anda tentang Pancasila, Pemerintahan Kalurahan, Keistimewaan DIY, dan Isu Terkini.
+                    Ujian ini menguji pengetahuan Anda tentang Pancasila, Pemerintahan Kalurahan, Keistimewaan DIY, Isu Terkini, dan Sejarah Lokal Bangunharjo.
                 </p>
                 ${warn}
                 <div style="display: grid; gap: 1rem; max-width: 500px; margin: 0 auto;">
@@ -493,14 +760,27 @@ function startQuiz(mode) {
     cancelAutoAdvance();
     if (State.quiz.timer) { clearInterval(State.quiz.timer); State.quiz.timer = null; }
 
+    // === PENGACAKAN ===
+    let randomized = filtered;
+    if (RANDOM_CONFIG.kuisOptions)   randomized = randomized.map(shuffleQuestionOptions);
+    if (RANDOM_CONFIG.kuisQuestions) randomized = shuffleArray(randomized);
+
+    if (RANDOM_CONFIG.showNotice && (RANDOM_CONFIG.kuisQuestions || RANDOM_CONFIG.kuisOptions)) {
+        const parts = [];
+        if (RANDOM_CONFIG.kuisQuestions) parts.push('urutan soal');
+        if (RANDOM_CONFIG.kuisOptions)   parts.push('urutan opsi');
+        toast(`🔀 Pengacakan aktif: ${parts.join(' & ')}.`, 'info');
+    }
+    // === END PENGACAKAN ===
+
     State.quiz = {
-        active: true, index: 0, score: 0, pointsPerQ: 100 / filtered.length,
-        activeQuestions: filtered, status: new Array(filtered.length).fill('unanswered'),
+        active: true, index: 0, score: 0, pointsPerQ: 100 / randomized.length,
+        activeQuestions: randomized, status: new Array(randomized.length).fill('unanswered'),
         wrongAnswers: {}, essayAnswers: {}, mode, endTime: 0, timer: null,
         autoAdvanceTimer: null, countdownTimer: null
     };
-    
-    const timeLimit = Math.max(7200, filtered.length * 60);
+
+    const timeLimit = Math.max(7200, randomized.length * 60);
     State.quiz.endTime = Date.now() + timeLimit * 1000;
 
     router();
@@ -647,7 +927,7 @@ function finishQuiz() {
 }
 
 // ==========================================
-// 8. PSIKOLOGI
+// 9. PSIKOLOGI (SJT)
 // ==========================================
 const PsikoData = [
     { q: "Semua Dukuh adalah pemimpin. Sebagian pemimpin adalah pendengar yang baik. Maka...", opts: ["Semua Dukuh pendengar yang baik.", "Sebagian Dukuh adalah pendengar yang baik.", "Tidak ada Dukuh yang pendengar baik.", "Semua pendengar baik adalah Dukuh."], ans: 1 },
@@ -700,7 +980,11 @@ const PsikoData = [
     { q: "Warga mengeluh jalan rusak. Anda belum punya dana. Anda...", opts: ["Berdiam diri.", "Mengajak gotong royong sementara dan mengusulkan dana ke Kalurahan.", "Menyalahkan cuaca."], ans: 1 },
     { q: "Seorang warga meminta Anda menjadi juru damai masalah keluarga, tapi Anda tidak sanggup. Anda...", opts: ["Memaksakan diri.", "Merujuk ke pihak yang lebih ahli (psikolog/tokoh agama).", "Mengabaikannya."], ans: 1 },
     { q: "Sebagai Dukuh, Anda menerima laporan bahwa ada warga yang mencuri listrik. Sikap Anda?", opts: ["Diamkan.", "Tegur, edukasi bahayanya, dan bantu proses pemasangan resmi.", "Umumkan ke seluruh warga."], ans: 1 },
-    { q: "Ada warga yang menolak vaksinasi anak karena alasan pribadi. Anda...", opts: ["Memaksa.", "Memberi edukasi bersama tenaga kesehatan.", "Membiarkan sepenuhnya."], ans: 1 }
+    { q: "Ada warga yang menolak vaksinasi anak karena alasan pribadi. Anda...", opts: ["Memaksa.", "Memberi edukasi bersama tenaga kesehatan.", "Membiarkan sepenuhnya."], ans: 1 },
+    // === SEJARAH LOKAL BANGUNHARJO (Tambahan) ===
+    { q: "Sebagai Calon Dukuh, Anda mengetahui bahwa Kalurahan Bangunharjo terbentuk dari penggabungan empat kalurahan lama. Apa tindakan pertama Anda untuk merawat memori sejarah ini?", opts: ["Membiarkannya karena itu hanya masa lalu.", "Mengusulkan pembuatan monumen atau prasasti yang mencantumkan nama empat kalurahan lama (Saman, Wojo, Ngoto, Jurug) di kantor kalurahan.", "Fokus pada pembangunan fisik modern tanpa perlu mengungkit sejarah."], ans: 1 },
+    { q: "Dalam sebuah rapat, seorang warga senior menyinggung jasa Lurah pertama, Atmo Suwito, yang menjabat sangat lama (1946-1982). Bagaimana tanggapan Anda?", opts: ["Mengalihkan pembicaraan karena tidak relevan dengan agenda saat ini.", "Mengapresiasi jasa beliau sebagai peletak dasar pemerintahan kalurahan dan mengajak warga untuk meneladani dedikasinya.", "Menyatakan bahwa kepemimpinan sekarang lebih baik dan modern."], ans: 1 },
+    { q: "Anda mendapati bahwa generasi muda di Bangunharjo banyak yang tidak mengetahui asal-usul wilayahnya (Saman, Wojo, Ngoto, Jurug). Sebagai Dukuh, Anda akan...", opts: ["Membiarkan saja karena yang penting adalah pembangunan ekonomi.", "Bekerja sama dengan Karang Taruna dan sekolah untuk mengadakan kegiatan 'Sinau Sejarah' atau lomba kreatif bertema sejarah lokal Bangunharjo.", "Memarahi para pemuda karena dianggap tidak peduli."], ans: 1 }
 ];
 
 function renderPsikologi() {
@@ -710,7 +994,7 @@ function renderPsikologi() {
                 <div style="font-size: 4rem; margin-bottom: 1rem;">🧠</div>
                 <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Tes Psikologi (SJT)</h2>
                 <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Tes Situational Judgment mengukur integritas, ketangguhan mental, dan pengambilan keputusan etis.
+                    Tes Situational Judgment mengukur integritas, ketangguhan mental, dan pengambilan keputusan etis — termasuk pelestarian sejarah lokal Bangunharjo.
                 </p>
                 <button class="btn btn-block" style="font-size: 1.2rem; padding: 1.25rem; max-width: 400px; margin: 0 auto;" onclick="startPsikologi()">Mulai Tes Psikologi</button>
             </div>`;
@@ -728,10 +1012,18 @@ function renderPsikologi() {
 }
 
 function startPsikologi() {
+    let items = PsikoData;
+    if (RANDOM_CONFIG.psikologiOptions)   items = items.map(shuffleSjtOptions);
+    if (RANDOM_CONFIG.psikologiQuestions) items = shuffleArray(items);
+
+    if (RANDOM_CONFIG.showNotice && (RANDOM_CONFIG.psikologiQuestions || RANDOM_CONFIG.psikologiOptions)) {
+        toast('🔀 Urutan situasi & opsi SJT diacak.', 'info');
+    }
+
     State.psikologi = {
         active: true, index: 0, score: 0,
-        pointsPerQ: 100 / PsikoData.length,
-        activeQuestions: PsikoData
+        pointsPerQ: 100 / items.length,
+        activeQuestions: items
     };
     router();
     showPsikologiQuestion();
@@ -778,14 +1070,18 @@ function finishPsikologi() {
 }
 
 // ==========================================
-// 9. WAWANCARA
+// 10. WAWANCARA
 // ==========================================
 const InterviewData = [
     { q: "Menurut Anda, apa VISI dan MISI utama yang harus dibawa untuk memajukan Padukuhan ini 5 tahun ke depan?", opts: ["Fokus pada pembangunan fisik jalan dan jembatan saja.", "Pemberdayaan SDM (Pemuda & UMKM) serta digitalisasi layanan padukuhan.", "Mengikuti semua program pemerintah tanpa inovasi."], ans: 1 },
     { q: "Apa alasan utama dan motivasi terbesar Anda mencalonkan diri sebagai Pamong Dukuh (Dukuh)?", opts: ["Ingin memiliki kekuasaan dan mempermudah urusan pribadi.", "Ingin mengabdi dan membantu menyelesaikan permasalahan warga secara langsung.", "Karena diminta oleh teman dan tidak ada pekerjaan lain."], ans: 1 },
     { q: "Sebutkan kelebihan (hard skill & soft skill) yang Anda miliki yang membuat Anda layak dipilih sebagai Dukuh!", opts: ["Kaya raya dan bisa membiayai kegiatan sendiri.", "Mampu berkomunikasi baik, berjiwa pemimpin, dan paham administrasi pemerintahan.", "Punya banyak massa pendukung."], ans: 1 },
     { q: "Bagaimana tanggapan Anda jika ada warga yang menolak program kerja Anda di forum rapat?", opts: ["Tetap melaksanakan program karena saya yang berkuasa.", "Mendengarkan alasannya, berdiskusi mencari titik temu, dan transparan terkait tujuan program.", "Mengeluarkan warga tersebut dari forum."], ans: 1 },
-    { q: "Apabila Anda terpilih menjadi Dukuh, langkah konkret pertama apa yang akan Anda lakukan di bulan pertama?", opts: ["Merombak semua staf dan perangkat desa.", "Melakukan pendataan ulang warga, evaluasi program lama, dan silaturahmi ke RT/RW.", "Menaikkan iuran bulanan warga."], ans: 1 }
+    { q: "Apabila Anda terpilih menjadi Dukuh, langkah konkret pertama apa yang akan Anda lakukan di bulan pertama?", opts: ["Merombak semua staf dan perangkat desa.", "Melakukan pendataan ulang warga, evaluasi program lama, dan silaturahmi ke RT/RW.", "Menaikkan iuran bulanan warga."], ans: 1 },
+    // === SEJARAH LOKAL BANGUNHARJO (Tambahan) ===
+    { q: "Tahukah Anda, dari kalurahan apa saja Kalurahan Bangunharjo ini terbentuk? Dan mengapa pengetahuan tentang hal ini penting bagi seorang Calon Dukuh?", opts: ["Tidak tahu. Yang penting adalah masa depan, bukan masa lalu.", "Terbentuk dari Kalurahan Saman, Wojo, Ngoto, dan Jurug. Penting agar Dukuh dapat merawat identitas bersama, menghormati sejarah, dan memperkuat persatuan warga dari latar belakang wilayah yang berbeda.", "Terbentuk dari satu desa besar. Ini penting hanya untuk urusan administrasi."], ans: 1 },
+    { q: "Kalurahan Bangunharjo memiliki sejarah panjang. Siapakah Lurah pertama yang menjabat dari tahun 1946 hingga 1982, dan apa yang bisa Anda teladani dari kepemimpinan beliau?", opts: ["Lurah pertama adalah Bapak Yuni Ardi Wibowo. Saya meneladani gaya kepemimpinannya yang modern.", "Lurah pertama adalah Bapak Atmo Suwito. Saya meneladani dedikasi dan loyalitas beliau yang sangat panjang dalam mengabdi dan membangun fondasi kalurahan ini.", "Saya tidak hafal nama Lurah pertama. Yang penting adalah kinerja saya saat ini."], ans: 1 },
+    { q: "Jika Anda terpilih, bagaimana Anda akan memperkenalkan sejarah Kalurahan Bangunharjo (berdiri 1946) kepada generasi muda, misalnya melalui nama 'MANJOTORUG'?", opts: ["Tidak perlu, karena sejarah tidak memberikan dampak ekonomi langsung.", "Mendukung kegiatan Karang Taruna dan komunitas seni seperti Teater Manjotorug sebagai wadah pelestarian sejarah, serta mengintegrasikannya dalam kegiatan resmi kalurahan.", "Mengganti nama-nama padukuhan dengan nama yang lebih modern agar terlihat maju."], ans: 1 }
 ];
 
 function renderWawancara() {
@@ -795,7 +1091,7 @@ function renderWawancara() {
                 <div style="font-size: 4rem; margin-bottom: 1rem;">🗣️</div>
                 <h2 style="font-size: 2rem; font-weight: 800; margin-bottom: 1rem;">Simulasi Tes Wawancara</h2>
                 <p style="color: var(--text-muted); font-size: 1.1rem; margin-bottom: 2.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                    Uji kepribadian, integritas, dan pemahaman Tupoksi Anda sebagai Calon Dukuh di hadapan Penguji.
+                    Uji kepribadian, integritas, pemahaman Tupoksi, dan pengetahuan sejarah lokal Bangunharjo di hadapan Penguji.
                 </p>
                 <button class="btn btn-block" style="font-size: 1.2rem; padding: 1.25rem; max-width: 400px; margin: 0 auto;" onclick="startWawancara()">Mulai Wawancara</button>
             </div>`;
@@ -819,10 +1115,18 @@ function renderWawancara() {
 }
 
 function startWawancara() {
+    let items = InterviewData;
+    if (RANDOM_CONFIG.wawancaraOptions)   items = items.map(shuffleSjtOptions);
+    if (RANDOM_CONFIG.wawancaraQuestions) items = shuffleArray(items);
+
+    if (RANDOM_CONFIG.showNotice && (RANDOM_CONFIG.wawancaraQuestions || RANDOM_CONFIG.wawancaraOptions)) {
+        toast('🔀 Urutan pertanyaan & opsi wawancara diacak.', 'info');
+    }
+
     State.wawancara = {
         active: true, index: 0, score: 0,
-        pointsPerQ: 100 / InterviewData.length,
-        activeQuestions: InterviewData, isSpeaking: false
+        pointsPerQ: 100 / items.length,
+        activeQuestions: items, isSpeaking: false
     };
     router();
     showWawancaraQuestion();
@@ -889,7 +1193,7 @@ function finishWawancara() {
 }
 
 // ==========================================
-// 10. KOMPUTER (Word/Excel/PPT)
+// 11. KOMPUTER (Word/Excel/PPT)
 // ==========================================
 function renderKomputer() {
     return `
@@ -1225,7 +1529,7 @@ function togglePres() {
 }
 
 // ==========================================
-// 11. PIDATO
+// 12. PIDATO
 // ==========================================
 function renderPidato() {
     if (!State.pidatoList || State.pidatoList.length === 0) {
@@ -1547,7 +1851,7 @@ function togglePidato() {
 }
 
 // ==========================================
-// 12. RAPAT (DRAMA)
+// 13. RAPAT (DRAMA)
 // ==========================================
 const AllDramaScripts = [
     [
@@ -1758,16 +2062,16 @@ function endRapatDrama(isWin, message) {
 }
 
 // ==========================================
-// 13. SYNC
+// 14. SYNC
 // ==========================================
 async function syncToServer(btn) {
-    const nameEl = document.getElementById('p-name');
-    if (!nameEl) return;
-    const name = nameEl.value.trim();
-    if (!name) return toast("Masukkan nama Anda terlebih dahulu.", "warning");
+    if (!Auth.user) return toast("Silakan login ulang.", "warning");
+    const name = Auth.user.nama;
+    if (!name) return toast("Nama akun kosong. Hubungi admin.", "warning");
 
     const original = btn.innerText;
-    btn.innerText = "⏳ Mengirim & Verifikasi..."; btn.disabled = true;
+    btn.innerText = "⏳ Mengirim & Verifikasi...";
+    btn.disabled = true;
 
     const payload = {
         nama: name,
@@ -1792,4 +2096,155 @@ async function syncToServer(btn) {
     }
 }
 
+// ==========================================
+// 15. ADMIN PANEL
+// ==========================================
+let __adminTab = 'pending';
+
+function renderAdmin() {
+    if (!Auth.user || Auth.user.role !== 'admin') {
+        return `<div class="text-center" style="padding:3rem;"><h3 style="color:var(--danger);">Akses ditolak. Halaman ini hanya untuk administrator.</h3></div>`;
+    }
+    return `
+        <div style="margin-bottom: 1.5rem;">
+            <h2 style="font-weight:800; font-size:1.8rem;">⚙️ Panel Admin</h2>
+            <p style="color: var(--text-muted);">Kelola pengguna dan lihat semua hasil ujian.</p>
+        </div>
+        <div class="sub-tabs">
+            <div class="sub-tab ${__adminTab === 'pending' ? 'active' : ''}" data-admin-tab="pending" onclick="switchAdminTab('pending')">📥 Pending (<span id="pending-count">-</span>)</div>
+            <div class="sub-tab ${__adminTab === 'users' ? 'active' : ''}" data-admin-tab="users" onclick="switchAdminTab('users')">👥 Semua User</div>
+            <div class="sub-tab ${__adminTab === 'results' ? 'active' : ''}" data-admin-tab="results" onclick="switchAdminTab('results')">📊 Semua Hasil</div>
+        </div>
+        <div id="admin-content" style="margin-top:1.5rem;">
+            <div class="text-center" style="padding:2rem; color:var(--text-muted);">⏳ Memuat...</div>
+        </div>`;
+}
+
+function switchAdminTab(tab) {
+    __adminTab = tab;
+    document.querySelectorAll('[data-admin-tab]').forEach(t => {
+        t.classList.toggle('active', t.getAttribute('data-admin-tab') === tab);
+    });
+    loadAdminPanel();
+}
+
+async function loadAdminPanel() {
+    const content = document.getElementById('admin-content');
+    if (!content) return;
+    content.innerHTML = `<div class="text-center" style="padding:2rem; color:var(--text-muted);">⏳ Memuat...</div>`;
+    try {
+        if (__adminTab === 'pending' || __adminTab === 'users') {
+            const res = await apiListUsers();
+            const users = res.users || [];
+            const pending = users.filter(u => u.status === 'pending');
+            const pc = document.getElementById('pending-count');
+            if (pc) pc.textContent = pending.length;
+            if (__adminTab === 'pending') {
+                content.innerHTML = renderUserTable(pending, 'pending');
+            } else {
+                content.innerHTML = renderUserTable(users, 'all');
+            }
+        } else if (__adminTab === 'results') {
+            const res = await apiGetResults();
+            content.innerHTML = renderResultsTable(res.results || []);
+        }
+    } catch (e) {
+        content.innerHTML = `<div style="color:var(--danger); padding:1rem;">❌ ${e.message}</div>`;
+    }
+}
+
+function renderUserTable(users, mode) {
+    if (!users.length) return `<div class="text-center" style="padding:2rem; color:var(--text-muted);">Tidak ada data.</div>`;
+    const rows = users.map(u => {
+        const statusBadge = {
+            pending: '<span style="background:#fef3c7;color:#92400e;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:700;">⏳ Pending</span>',
+            approved: '<span style="background:#d1fae5;color:#065f46;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:700;">✅ Approved</span>',
+            rejected: '<span style="background:#fee2e2;color:#991b1b;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:700;">❌ Rejected</span>'
+        }[u.status] || u.status;
+        const roleBadge = u.role === 'admin'
+            ? '<span style="background:#e0e7ff;color:#4338ca;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:700;">👑 Admin</span>'
+            : '<span style="background:#f1f5f9;color:#475569;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:700;">👤 User</span>';
+        let actions = '';
+        if (u.status === 'pending') {
+            actions = `<button class="btn btn-success" style="padding:0.4rem 0.8rem;font-size:0.8rem;" onclick="adminApprove('${u.id}')">✅ Approve</button>
+                       <button class="btn btn-danger" style="padding:0.4rem 0.8rem;font-size:0.8rem;" onclick="adminReject('${u.id}')">❌ Reject</button>`;
+        } else if (mode === 'all' && u.role !== 'admin') {
+            actions = `<button class="btn btn-danger" style="padding:0.4rem 0.8rem;font-size:0.8rem;" onclick="adminDelete('${u.id}')">🗑️ Hapus</button>`;
+        }
+        return `<tr>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);">${u.username}</td>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);">${u.nama}</td>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);">${roleBadge}</td>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);">${statusBadge}</td>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);font-size:0.8rem;color:var(--text-muted);">${u.lastLogin ? new Date(u.lastLogin).toLocaleString('id-ID') : '-'}</td>
+            <td style="padding:0.6rem;border-bottom:1px solid var(--border);text-align:right;">${actions}</td>
+        </tr>`;
+    }).join('');
+    return `<div style="overflow-x:auto; background:var(--bg-card); border-radius:var(--radius-md); padding:1rem;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+            <thead><tr style="text-align:left;">
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);">Username</th>
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);">Nama</th>
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);">Role</th>
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);">Status</th>
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);">Login Terakhir</th>
+                <th style="padding:0.6rem;border-bottom:2px solid var(--border);text-align:right;">Aksi</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    </div>`;
+}
+
+function renderResultsTable(results) {
+    if (!results.length) return `<div class="text-center" style="padding:2rem; color:var(--text-muted);">Belum ada hasil ujian.</div>`;
+    const rows = results.slice().reverse().map(r => `<tr>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);font-size:0.8rem;">${r.timestamp ? new Date(r.timestamp).toLocaleString('id-ID') : '-'}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);font-weight:600;">${r.nama}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.kuis}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.word}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.excel}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.presentasi}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.pidato}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.rapat}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.wawancara}</td>
+        <td style="padding:0.5rem;border-bottom:1px solid var(--border);text-align:center;">${r.psikologi}</td>
+    </tr>`).join('');
+    return `<div style="overflow-x:auto; background:var(--bg-card); border-radius:var(--radius-md); padding:1rem;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+            <thead><tr style="text-align:left;">
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);">Waktu</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);">Nama</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Kuis</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Word</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Excel</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">PPT</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Pidato</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Rapat</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Wwncr</th>
+                <th style="padding:0.5rem;border-bottom:2px solid var(--border);text-align:center;">Psiko</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    </div>`;
+}
+
+async function adminApprove(id) {
+    if (!confirm('Setujui user ini?')) return;
+    try { await apiApproveUser(id); toast('User disetujui.', 'success'); loadAdminPanel(); }
+    catch (e) { toast(e.message, 'error'); }
+}
+async function adminReject(id) {
+    if (!confirm('Tolak user ini?')) return;
+    try { await apiRejectUser(id); toast('User ditolak.', 'success'); loadAdminPanel(); }
+    catch (e) { toast(e.message, 'error'); }
+}
+async function adminDelete(id) {
+    if (!confirm('Hapus user ini permanen?')) return;
+    try { await apiDeleteUser(id); toast('User dihapus.', 'success'); loadAdminPanel(); }
+    catch (e) { toast(e.message, 'error'); }
+}
+
+// ==========================================
+// 16. BOOTSTRAP
+// ==========================================
 window.onload = () => { initApp(); };
